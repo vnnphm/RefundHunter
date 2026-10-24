@@ -10,13 +10,19 @@ import re
 import sys
 from email.utils import parseaddr
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
-from uagents_core.identity import Identity
-from uagents_core.utils.messages import send_message_to_agent
+import uagents_core.logger
 
-from models import Receipt
+# uagents_core opens ./uagents_core.log on import; Vercel's filesystem is read-only,
+# so log to stdout only. Must run before any other uagents import.
+uagents_core.logger.get_logger.__defaults__ = (None, logging.INFO, None)  # name, level, log_file
+
+from dotenv import load_dotenv  # noqa: E402
+from fastapi import FastAPI, Header, HTTPException  # noqa: E402
+from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
+from uagents_core.identity import Identity  # noqa: E402
+from uagents_core.utils.messages import send_message_to_agent  # noqa: E402
+
+from models import Receipt  # noqa: E402
 
 load_dotenv()
 
