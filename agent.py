@@ -78,7 +78,9 @@ def new_item_id() -> str:
     return "it_" + uuid4().hex[:8]
 
 
-def menu_card() -> dict:
+def menu_card(pending: int = 0) -> dict:
+    review = [{"type": "button", "label": f"Review {pending} new receipt{'s' if pending != 1 else ''}",
+               "primary": True, "action": {"selection": {"action": "check_receipts"}}}] if pending else []
     return {"root": {
         "type": "section",
         "title": "Refund Hunter",
@@ -97,6 +99,7 @@ def menu_card() -> dict:
                 {"type": "button", "label": "Link my email",
                  "action": {"selection": {"action": "link_email"}}},
             ]},
+            *review,
         ],
     }}
 
@@ -206,12 +209,15 @@ def items_carousel(items: list[dict]) -> dict:
 
 def parse_selection(text: str) -> dict:
     """JSON for a direct @mention; prose when ASI:One's planner relays it."""
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            return data.get("selection") if isinstance(data.get("selection"), dict) else data
-    except ValueError:
-        pass
+    # Card clicks can arrive as '@agent1… {"action": …}', so parse from the first brace.
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            data = json.loads(text[start:end + 1])
+            if isinstance(data, dict):
+                return data.get("selection") if isinstance(data.get("selection"), dict) else data
+        except ValueError:
+            pass
     sel: dict = {}
     lower = text.lower()
     # The planner usually repeats our action names verbatim; trust those first.
@@ -230,13 +236,13 @@ def parse_selection(text: str) -> dict:
         sel["action"] = "submit_item"
     elif "link" in lower and ("email" in lower or "email" in sel):
         sel["action"] = "link_email"
-    elif re.search(r"\breceipts\b", lower):  # "any new receipts?"
+    elif re.search(r"\brec(ei|ie)pts\b", lower):  # "any new receipts?" (or "reciepts")
         sel["action"] = "check_receipts"
-    elif re.search(r"\b(approved?|confirm(ed)?|track (these|this|them|it))\b", lower) and "receipt" in lower:
+    elif re.search(r"\b(approved?|confirm(ed)?|track (these|this|them|it))\b", lower) and re.search(r"rec(ei|ie)pt", lower):
         sel["action"] = "track_receipt"
     elif re.search(r"\b(dismiss(ed)?|reject(ed)?|not now|cancel(led)?)\b", lower):
         sel["action"] = "dismiss_receipt"
-    elif "receipt" in lower or "photo" in lower or "upload" in lower:
+    elif re.search(r"rec(ei|ie)pt", lower) or "photo" in lower or "upload" in lower:
         sel["action"] = "upload_receipt"
     elif "add" in lower or "another" in lower:
         sel["action"] = "add_item"
@@ -470,7 +476,8 @@ async def handle_text(ctx: Context, sender: str, text: str):
     elif action == "list_items":
         items = store.list_items(sender)
         if not items:
-            await ctx.send(sender, card("You're not tracking anything yet.", "custom", menu_card()))
+            await ctx.send(sender, card("You're not tracking anything yet.", "custom",
+                                        menu_card(len(store.pending_receipts(sender)))))
             return
         await ctx.send(sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
     elif action == "view_item":
@@ -492,9 +499,9 @@ async def handle_text(ctx: Context, sender: str, text: str):
                                     add_item_form(new_item_id(), url)))
     else:
         n = len(store.pending_receipts(sender))
-        nudge = f" You have {n} new receipt{'s' if n != 1 else ''} to review: say \"any new receipts?\"" if n else ""
+        nudge = f" You have {n} new receipt{'s' if n != 1 else ''} to review." if n else ""
         await ctx.send(sender, card(
-            "Hi! Add an item by link, or upload a receipt photo." + nudge, "custom", menu_card()))
+            "Hi! Add an item by link, or upload a receipt photo." + nudge, "custom", menu_card(n)))
 
 
 @chat.on_message(ChatMessage)
