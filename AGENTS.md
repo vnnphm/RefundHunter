@@ -19,7 +19,7 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Agent | File | Phase | Job | Receives | Sends |
 | --- | --- | --- | --- | --- | --- |
 | Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
-| Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data | `TrackItem` | `PriceResult` |
+| Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data; searches Amazon for receipt items without a link | `TrackItem`, `FindProduct` | `PriceResult`, `FindResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
 | Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
@@ -28,7 +28,7 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pi
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
-**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow.
+**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow. An Amazon item without a link → `FindProduct` → price agent searches → `FindResult` → carousel → user picks one → Phase 1 flow.
 
 **Flow (Phase 2, email):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
 
@@ -87,6 +87,25 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     purchase_date: str = ""   # YYYY-MM-DD
     order_number: str = ""
     items: list[ReceiptItem] = []
+    error: Optional[str] = None
+
+class FindProduct(Model):     # coordinator -> price agent: a receipt item with no link
+    item_id: str
+    user_id: str
+    query: str                # item name from the receipt
+    store: str = "amazon"
+
+class ProductMatch(Model):
+    name: str
+    product_url: str
+    price: Optional[float] = None
+    image_url: str = ""
+
+class FindResult(Model):      # price agent -> coordinator
+    item_id: str
+    user_id: str
+    ok: bool
+    matches: list[ProductMatch] = []
     error: Optional[str] = None
 ```
 
@@ -167,6 +186,8 @@ Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Base
 
 **Built:** Path A for Amazon and Walmart in `price_agent.py`. `store: "other"` replies `ok=False, error="store not supported yet"` until C is added. Dataset ids come from [scrapers.json](https://docs.brightdata.com/scrapers.json).
 Test one link without starting the agent (costs one credit): `uv run price_agent.py --check <url> [amazon|walmart]`.
+
+**Search (receipt items without a link):** Amazon products search `gd_lwdb4vjm1ehb499uxs`, input `{"keyword", "url": "https://www.amazon.com", "pages_to_search": 1}` with `limit_per_input=3` (honoured: 3 records = 3 credits, ~7 s). Fields: `asin`, `name`, `final_price`, `image`, `sponsored`, `rank_on_page`. Sponsored and priceless results are skipped; URLs become `https://www.amazon.com/dp/<asin>`, and their prices go into the 10-minute cache, so tracking a pick costs nothing. No Walmart search scraper is listed, so Walmart items still get the link form. Test: `uv run price_agent.py --search "<item name>"` (3 credits).
 
 **Auth and budget**
 - One API key. REST: `Authorization: Bearer <BRIGHTDATA_API_TOKEN>`. MCP: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`.
@@ -269,7 +290,7 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5) and the ASI:One API docs on image input.
 
-**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Step 3 is built in `parser_agent.py` (photos and email text; test with `uv run parser_agent.py --check <photo | link | email.txt>`). Steps 4–5 are next.
+**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Step 3 is built in `parser_agent.py` (photos and email text; test with `uv run parser_agent.py --check <photo | link | email.txt>`). Steps 4–5 are built in `agent.py` (review card, link form, Amazon search carousel).
 
 **1. Tell ASI:One we accept attachments.** When a `StartSessionContent` arrives, reply with:
 ```python
@@ -311,7 +332,7 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 **4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
 
-**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`, show a `form` card asking for the link. Later, if there's time: search for it (Bright Data MCP `search_engine`, or Amazon's Products Search scraper `gd_lwdb4vjm1ehb499uxs`) and let the user pick from a `carousel`.
+**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`: on an Amazon receipt, the coordinator sends `FindProduct` and shows the top 3 Amazon matches in a `carousel` (each tile's button is a filled-in `submit_item`), then a link form for "not listed". The user picks, because one name matches several variants (sizes, kits). Other stores, or no matches, get the link form.
 
 **Rules**
 - Only use the photo to read the receipt; don't store the image or its bytes. Keep only the parsed fields.

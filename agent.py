@@ -15,7 +15,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 import store
-from models import ParsedReceipt, PriceResult, Receipt, TrackItem
+from models import FindProduct, FindResult, ParsedReceipt, PriceResult, Receipt, TrackItem
 
 load_dotenv()
 
@@ -203,6 +203,27 @@ def items_carousel(items: list[dict]) -> dict:
     return {"title": "Your tracked items",
             "subtitle": f"{len(items)} item{'s' if len(items) != 1 else ''}",
             "items": tiles}
+
+
+def match_carousel(item_id: str, name: str, price_paid: float, matches: list) -> dict:
+    """Amazon search results for a receipt item; tapping one tracks it like a filled-in form."""
+    tiles = []
+    for m in matches:
+        if m.price and price_paid - m.price > 1:
+            badge = {"label": f"${price_paid - m.price:.2f} less now", "variant": "success"}
+        else:
+            badge = {"label": "Amazon", "variant": "info"}
+        tiles.append({
+            "id": m.product_url.rsplit("/", 1)[-1],
+            "title": m.name[:80],
+            "subtitle": m.product_url.rsplit("/", 1)[-1],  # the ASIN, to tell look-alikes apart
+            "badges": [badge],
+            "secondary_text": f"Now ${m.price:.2f}" if m.price else "Price unknown",
+            "primary_cta": {"label": "This one", "selection": {
+                "action": "submit_item", "item_id": item_id, "product_url": m.product_url,
+                "price_paid": price_paid, "name": name}},
+        })
+    return {"title": f"Which one is {name[:50]}?", "subtitle": f"You paid ${price_paid:.2f}", "items": tiles}
 
 
 # ---- Parsing -----------------------------------------------------------------
@@ -396,6 +417,30 @@ async def on_parsed_receipt(ctx: Context, sender: str, msg: ParsedReceipt):
     await show_parsed(ctx, msg)
 
 
+@agent.on_message(model=FindResult)
+async def on_find_result(ctx: Context, sender: str, msg: FindResult):
+    """Search results for a receipt item: let the user pick, or ask for the link."""
+    if not PRICE_AGENT_ADDRESS or sender != PRICE_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring FindResult from unexpected sender {sender}")
+        return
+    wanted = ctx.storage.get(f"find:{msg.item_id}")
+    if wanted is None:
+        ctx.logger.info(f"search {msg.item_id} already handled")
+        return
+    ctx.storage.remove(f"find:{msg.item_id}")
+    name, paid = wanted["name"], wanted["price_paid"]
+    form = add_item_form(msg.item_id, "", paid, name)
+    if msg.ok and msg.matches:
+        ctx.logger.info(f"search {msg.item_id}: {len(msg.matches)} match(es) for {msg.user_id}")
+        await ctx.send(msg.user_id, card(f"Which one did you buy? You paid ${paid:.2f}.", "carousel",
+                                         match_carousel(msg.item_id, name, paid, msg.matches)))
+        await ctx.send(msg.user_id, card("Not listed? Paste the link.", "form", form))
+    else:
+        ctx.logger.info(f"search {msg.item_id} found nothing: {msg.error or 'no matches'}")
+        await ctx.send(msg.user_id, card(f"I couldn't find {name[:60]} on Amazon. What's the link?",
+                                         "form", form))
+
+
 def find_receipt(sender: str, sel: dict, text: str) -> dict | None:
     """The receipt a review-card button refers to, even when the planner relays it as prose."""
     rec = store.get_receipt(sel.get("message_id", ""))
@@ -461,6 +506,12 @@ async def handle_text(ctx: Context, sender: str, text: str):
         for it in rec["items"]:
             if valid_url(it["product_url"]):
                 await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"])
+            elif rec["store"] == "amazon" and PRICE_AGENT_ADDRESS:  # search for it, user picks
+                item_id = new_item_id()
+                ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"]})
+                await ctx.send(sender, reply(f"Looking up {it['name'][:60]} on Amazon…"))
+                await ctx.send(PRICE_AGENT_ADDRESS, FindProduct(item_id=item_id, user_id=sender,
+                                                                query=it["name"]))
             else:  # paper receipts and some emails have no product link
                 await ctx.send(sender, card(f"What's the product link for {it['name'][:60]}?", "form",
                                             add_item_form(new_item_id(), "", it["price_paid"], it["name"])))

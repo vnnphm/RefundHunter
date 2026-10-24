@@ -8,7 +8,7 @@ import httpx
 from dotenv import load_dotenv
 from uagents import Agent, Context
 
-from models import PriceResult, TrackItem
+from models import FindProduct, FindResult, PriceResult, ProductMatch, TrackItem
 
 load_dotenv()
 
@@ -18,6 +18,8 @@ DATASETS = {
     "amazon": "gd_l7q7dkf244hwjntr0",   # Amazon products
     "walmart": "gd_l95fol7l1ru6rlo116",  # Walmart - products
 }
+SEARCH_DATASET = "gd_lwdb4vjm1ehb499uxs"  # Amazon products search, by keyword
+SEARCH_LIMIT = 3  # records are billed one credit each: ask for only what the carousel shows
 PRICE_FIELDS = ("final_price", "price", "initial_price")
 POLL_LIMIT_S = 180
 CACHE_TTL_S = 600  # free tier credits are shared: don't re-scrape a URL for 10 min
@@ -42,6 +44,15 @@ class ScrapeError(Exception):
 
 async def scrape(url: str, dataset_id: str, client: httpx.AsyncClient | None = None) -> dict:
     """Run one Bright Data Scraper API job for one URL and return its record."""
+    records = await scrape_records({"url": url}, dataset_id, client=client)
+    if not records:
+        raise ScrapeError("no product found at that link")
+    return records[0]
+
+
+async def scrape_records(inp: dict, dataset_id: str, params: dict | None = None,
+                         client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Run one Bright Data Scraper API job for one input and return all its records."""
     token = os.getenv("BRIGHTDATA_API_TOKEN", "")
     if not token:
         raise ScrapeError("BRIGHTDATA_API_TOKEN is not set")
@@ -49,8 +60,9 @@ async def scrape(url: str, dataset_id: str, client: httpx.AsyncClient | None = N
     client = client or httpx.AsyncClient(timeout=90)
     client.headers["Authorization"] = f"Bearer {token}"
     try:
-        r = await client.post(f"{BD_API}/scrape", params={"dataset_id": dataset_id, "format": "json"},
-                              json={"input": [{"url": url}]})
+        r = await client.post(f"{BD_API}/scrape",
+                              params={"dataset_id": dataset_id, "format": "json", **(params or {})},
+                              json={"input": [inp]})
         if r.status_code == 202:  # took over a minute: poll the snapshot
             sid = r.json()["snapshot_id"]
             deadline = time.monotonic() + POLL_LIMIT_S
@@ -73,9 +85,9 @@ async def scrape(url: str, dataset_id: str, client: httpx.AsyncClient | None = N
     finally:
         if own:
             await client.aclose()
-    if not isinstance(records, list) or not records:
-        raise ScrapeError("no product found at that link")
-    return records[0]
+    if not isinstance(records, list):
+        raise ScrapeError("unexpected reply from Bright Data")
+    return [rec for rec in records if isinstance(rec, dict) and not rec.get("error")]
 
 
 def check(r: httpx.Response):
@@ -132,6 +144,61 @@ async def on_track(ctx: Context, sender: str, req: TrackItem):
     await ctx.send(sender, result)
 
 
+async def find_products(query: str, client: httpx.AsyncClient | None = None) -> list[ProductMatch]:
+    """Search Amazon for a receipt item's name. Top matches, cached so tracking one is free."""
+    records = await scrape_records(
+        {"keyword": query[:80], "url": "https://www.amazon.com", "pages_to_search": 1},
+        SEARCH_DATASET, {"limit_per_input": SEARCH_LIMIT}, client)
+    matches = []
+    for rec in sorted(records, key=lambda r: r.get("rank_on_page") or 99):
+        price, asin = pick_price(rec), rec.get("asin")
+        if not asin or price is None or str(rec.get("sponsored")).lower() == "true":
+            continue
+        url = f"https://www.amazon.com/dp/{asin}"
+        name = rec.get("name") or rec.get("title") or ""
+        _cache[url] = (time.time(), price, name)
+        matches.append(ProductMatch(name=name, product_url=url, price=price, image_url=rec.get("image") or ""))
+        if len(matches) == SEARCH_LIMIT:
+            break
+    return matches
+
+
+@agent.on_message(model=FindProduct, replies=FindResult)
+async def on_find(ctx: Context, sender: str, req: FindProduct):
+    start = time.monotonic()
+    try:
+        if req.store != "amazon":
+            raise ScrapeError("search only works for Amazon")
+        result = FindResult(item_id=req.item_id, user_id=req.user_id, ok=True,
+                            matches=await find_products(req.query))
+    except ScrapeError as e:
+        result = FindResult(item_id=req.item_id, user_id=req.user_id, ok=False, error=str(e))
+    except Exception as e:  # never leave the coordinator waiting
+        ctx.logger.exception(f"search crashed for {req.item_id}")
+        result = FindResult(item_id=req.item_id, user_id=req.user_id, ok=False,
+                            error=f"unexpected error: {type(e).__name__}")
+    outcome = f"{len(result.matches)} match(es)" if result.ok else f"failed ({result.error})"
+    ctx.logger.info(f"search {req.item_id}: {outcome} in {time.monotonic() - start:.1f}s")
+    await ctx.send(sender, result)
+
+
+async def search_once(query: str):
+    """Manual test: one search, print what came back. Costs one credit per record."""
+    try:
+        records = await scrape_records(
+            {"keyword": query[:80], "url": "https://www.amazon.com", "pages_to_search": 1},
+            SEARCH_DATASET, {"limit_per_input": SEARCH_LIMIT})
+    except ScrapeError as e:
+        print(f"failed: {e}")
+        return
+    print(f"{len(records)} record(s) delivered (limit asked: {SEARCH_LIMIT})")
+    for rec in records[:10]:
+        print(f"  #{rec.get('rank_on_page')} sponsored={rec.get('sponsored')} ${pick_price(rec)} "
+              f"{rec.get('asin')} {(rec.get('name') or '')[:70]}")
+    if records:
+        print("all keys:", sorted(records[0]))
+
+
 async def check_once(url: str, store: str):
     """Manual test: one scrape, print what came back. Costs one credit."""
     try:
@@ -145,7 +212,10 @@ async def check_once(url: str, store: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--check":
+    if len(sys.argv) > 2 and sys.argv[1] == "--search":
+        # uv run price_agent.py --search "<item name>"
+        asyncio.run(search_once(sys.argv[2]))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--check":
         # uv run price_agent.py --check <url> [amazon|walmart]
         asyncio.run(check_once(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "amazon"))
     else:
