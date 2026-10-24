@@ -1,0 +1,8 @@
+[project]
+name = "refundhunter"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "python-dotenv==1.2.4",
+    "uagents==0.26.1",
+]
