@@ -10,15 +10,13 @@ from datetime import date
 
 import httpx
 from dotenv import load_dotenv
-from openai import APIError, AsyncOpenAI, BadRequestError
 from uagents import Agent, Context
 
+from asi import LLMError, ask_json
 from models import ParsedReceipt, Receipt, ReceiptItem
 
 load_dotenv()
 
-ASI_API = "https://api.asi1.ai/v1"
-MODEL = "asi1"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # ASI:One's limit per image
 DOWNLOAD_TIMEOUT_S = 30
 BODY_LIMIT = 8000
@@ -107,32 +105,10 @@ def data_uri(mime: str, data: bytes) -> str:
 
 async def read_receipt(content: list[dict]) -> dict:
     """One asi1 call with the receipt; returns the model's JSON."""
-    key = os.getenv("ASI_ONE_API_KEY", "")
-    if not key:
-        raise ParseError("ASI_ONE_API_KEY is not set")
-    llm = AsyncOpenAI(api_key=key, base_url=ASI_API)
     try:
-        r = await llm.chat.completions.create(
-            model=MODEL, temperature=0,
-            response_format={"type": "json_schema", "json_schema": SCHEMA},
-            messages=[{"role": "user", "content": content}])
-    except BadRequestError as e:
-        if "unsupported_content_part" in str(e.body or e):
-            raise ParseError("couldn't read that photo") from e
-        raise ParseError("ASI:One rejected the request") from e
-    except APIError as e:
-        raise ParseError(f"ASI:One error: {type(e).__name__}") from e
-    finally:
-        await llm.close()
-    text = (r.choices[0].message.content or "").strip()
-    text = text.removeprefix("`" * 3 + "json").strip("`\n ")  # drop a markdown fence if present
-    try:
-        data = json.loads(text)
-    except ValueError as e:
-        raise ParseError("ASI:One didn't return JSON") from e
-    if not isinstance(data, dict):
-        raise ParseError("ASI:One didn't return JSON")
-    return data
+        return await ask_json(content, SCHEMA)
+    except LLMError as e:
+        raise ParseError(str(e)) from e
 
 
 def photo_content(image: str) -> list[dict]:

@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -15,7 +15,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 import store
-from models import ParsedReceipt, PriceResult, Receipt, TrackItem
+from models import ParsedReceipt, PolicyResult, PriceResult, Receipt, TrackItem
 
 load_dotenv()
 
@@ -23,6 +23,8 @@ load_dotenv()
 PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 # Empty until the parser agent is running: the coordinator mocks ParsedReceipt instead.
 PARSER_AGENT_ADDRESS = os.getenv("PARSER_AGENT_ADDRESS", "").strip()
+# Empty until the policy agent is running: cards just leave out the refund policy rows.
+POLICY_AGENT_ADDRESS = os.getenv("POLICY_AGENT_ADDRESS", "").strip()
 # The email webhook (server.py); only it may send us Receipts.
 SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "").strip()
 # Shared Pipedream address users forward order emails to.
@@ -105,7 +107,7 @@ def menu_card(pending: int = 0) -> dict:
 
 
 def add_item_form(item_id: str, product_url: str = "", price_paid: float | None = None,
-                  name: str = "") -> dict:
+                  name: str = "", purchase_date: str = "") -> dict:
     """Asks only for what we don't already know: the link, the price paid, the name."""
     fields = [] if product_url else [
         {"name": "product_url", "kind": "text", "label": "Product link", "required": True}]
@@ -122,6 +124,8 @@ def add_item_form(item_id: str, product_url: str = "", price_paid: float | None 
         selection["price_paid"] = price_paid
     if name:
         selection["name"] = name
+    if purchase_date:
+        selection["purchase_date"] = purchase_date
     return {
         "title": f"Track: {name[:60]}" if name else "Track an item",
         "fields": fields,
@@ -159,12 +163,42 @@ def receipt_review(rec: dict, mock: bool) -> dict:
     }
 
 
+def return_by(item: dict) -> date | None:
+    """Last day to return: purchase date (else the day it was added) + the store's window."""
+    if item["return_days"] is None:
+        return None
+    try:
+        bought = date.fromisoformat(item["purchase_date"] or item["added_at"][:10])
+    except ValueError:
+        return None
+    return bought + timedelta(days=item["return_days"])
+
+
+def policy_rows(item: dict) -> list[dict]:
+    """Refund policy rows for the detail card; none until the policy agent has answered."""
+    rows = []
+    deadline = return_by(item)
+    if item["returnable"] == 0:
+        rows.append({"label": "Returns", "value": "Not returnable"})
+    elif deadline:
+        passed = " (passed)" if deadline < datetime.now(timezone.utc).date() else ""
+        rows.append({"label": "Return by", "value": deadline.isoformat() + passed})
+    if item["price_adjust_days"] == 0:
+        rows.append({"label": "Price adjustment", "value": "Not offered"})
+    elif item["price_adjust_days"]:
+        rows.append({"label": "Price adjustment", "value": f"Within {item['price_adjust_days']} days"})
+    if item["policy_summary"]:
+        rows.append({"label": "Policy", "value": item["policy_summary"][:200]})
+    return rows
+
+
 def price_detail(item: dict, mock: bool) -> dict:
     drop = item["price_paid"] - item["current_price"]
     rows = [
         {"label": "You paid", "value": f"${item['price_paid']:.2f}"},
         {"label": "Price now", "value": f"${item['current_price']:.2f}"},
         {"label": "Result", "value": f"Dropped ${drop:.2f}" if drop > 1 else "No change"},
+        *policy_rows(item),
         {"label": "Store", "value": item["store"].title()},
         {"label": "Checked", "value": item["checked_at"][:16].replace("T", " ") + " UTC"},
     ]
@@ -335,6 +369,28 @@ async def on_price_result(ctx: Context, sender: str, msg: PriceResult):
     await show_price(ctx, msg)
 
 
+# ---- Refund policy -----------------------------------------------------------
+
+@agent.on_message(model=PolicyResult)
+async def on_policy_result(ctx: Context, sender: str, msg: PolicyResult):
+    if not POLICY_AGENT_ADDRESS or sender != POLICY_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring PolicyResult from unexpected sender {sender}")
+        return
+    item = store.get_item(msg.item_id)
+    if item is None:
+        ctx.logger.warning(f"policy for unknown item {msg.item_id}")
+        return
+    if not msg.ok:  # the price card still stands on its own
+        ctx.logger.info(f"policy check failed for {msg.item_id}: {msg.error}")
+        return
+    store.save_policy(msg.item_id, msg.returnable, msg.return_days, msg.price_adjust_days, msg.summary)
+    item = store.get_item(msg.item_id)
+    if item["current_price"] is None:
+        return  # the price card, when it comes, shows the policy rows
+    await ctx.send(item["user_id"], card(msg.summary or "Checked the refund policy.", "detail",
+                                         price_detail(item, mock=not PRICE_AGENT_ADDRESS)))
+
+
 # ---- Receipts ----------------------------------------------------------------
 
 def mock_parse(r: Receipt) -> ParsedReceipt:
@@ -407,15 +463,18 @@ def find_receipt(sender: str, sel: dict, text: str) -> dict | None:
 # ---- Handlers ----------------------------------------------------------------
 
 async def track_new_item(ctx: Context, sender: str, url: str, price: float, name: str,
-                         item_id: str | None = None):
+                         item_id: str | None = None, purchase_date: str = ""):
     item_id = item_id or new_item_id()
     shop = store_for(url)
-    if not store.add_item(item_id, sender, url, shop, price, name):
+    if not store.add_item(item_id, sender, url, shop, price, name, purchase_date):
         await ctx.send(sender, reply("That item is already being tracked."))
         return
     ctx.logger.info(f"saved {item_id} ({shop}) for {sender}")
     await ctx.send(sender, reply(f"Tracking it: paid ${price:.2f} at {shop.title()}. Checking price…"))
-    await request_price(ctx, TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop))
+    req = TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop)
+    if POLICY_AGENT_ADDRESS:  # first: the mocked price below waits a moment
+        await ctx.send(POLICY_AGENT_ADDRESS, req)
+    await request_price(ctx, req)
 
 
 async def handle_text(ctx: Context, sender: str, text: str):
@@ -431,7 +490,9 @@ async def handle_text(ctx: Context, sender: str, text: str):
                 "I need a full product link (starting with https://) and the price you paid.",
                 "form", add_item_form(item_id, url if valid_url(url) else "")))
             return
-        await track_new_item(ctx, sender, url, price, str(sel.get("name") or "").strip(), item_id)
+        bought = str(sel.get("purchase_date") or "")
+        await track_new_item(ctx, sender, url, price, str(sel.get("name") or "").strip(), item_id,
+                             bought if re.fullmatch(r"\d{4}-\d{2}-\d{2}", bought) else "")
     elif action == "link_email":
         email = (sel.get("email") or "").strip()
         if not EMAIL_RE.fullmatch(email):
@@ -459,10 +520,12 @@ async def handle_text(ctx: Context, sender: str, text: str):
         store.set_receipt_status(rec["message_id"], "tracked")
         for it in rec["items"]:
             if valid_url(it["product_url"]):
-                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"])
+                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"],
+                                     purchase_date=rec["purchase_date"])
             else:  # paper receipts and some emails have no product link
                 await ctx.send(sender, card(f"What's the product link for {it['name'][:60]}?", "form",
-                                            add_item_form(new_item_id(), "", it["price_paid"], it["name"])))
+                                            add_item_form(new_item_id(), "", it["price_paid"], it["name"],
+                                                          rec["purchase_date"])))
     elif action == "dismiss_receipt":
         rec = find_receipt(sender, sel, text)
         if rec and rec["status"] == "pending":

@@ -18,13 +18,13 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 
 | Agent | File | Phase | Job | Receives | Sends |
 | --- | --- | --- | --- | --- | --- |
-| Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
+| Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price and policy agents about them. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt`, `PolicyResult` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
 | Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data | `TrackItem` | `PriceResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
 | Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when; does the store refund a price drop (Bright Data MCP + `asi1`) | `TrackItem` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
 
-Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pipedream, Bright Data.
+Not agents: `store.py` (SQLite, shared state), `bd.py` (Bright Data helpers: Scraper API + MCP), `asi.py` (`asi1` JSON calls), `server.py` (FastAPI webhook), Pipedream, Bright Data.
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
@@ -165,7 +165,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 
 ## Price scraping (Bright Data)
 
-Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Based on Bright Data's own agent guidance in [llms.txt](https://docs.brightdata.com/llms.txt): use a ready-made Scraper API when the site has one; use the MCP for page fetching; never fetch through a raw proxy and parse HTML yourself.
+Owner: Person B, in `price_agent.py`; the shared Scraper API and MCP helpers live in `bd.py`. Based on Bright Data's own agent guidance in [llms.txt](https://docs.brightdata.com/llms.txt): use a ready-made Scraper API when the site has one; use the MCP for page fetching; never fetch through a raw proxy and parse HTML yourself.
 
 **Which path for which store**
 
@@ -280,15 +280,15 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 Owner: Person B, in `policy_agent.py`. Answers a `TrackItem` with a `PolicyResult`: can this item be returned, how many days the window is, and whether the store refunds a price drop (the case Refund Hunter cares about most). Uses Bright Data's MCP (Path B/C above), not a hand-written scraper.
 
-**Status:** built; not yet called by the coordinator. Test one link (2–3 credits + one `asi1` call): `uv run policy_agent.py --check <url> [amazon|walmart|other]`. `uv run policy_agent.py --tools` prints the MCP tools and their inputs (Step 0, free).
+**Status:** built and called by the coordinator when `POLICY_AGENT_ADDRESS` is set. Test one link (2–3 credits + one `asi1` call): `uv run policy_agent.py --check <url> [amazon|walmart|other]`. `uv run policy_agent.py --tools` prints the MCP tools and their inputs (Step 0, free).
 
 **How it works**
 1. Store domain: `amazon.com` / `walmart.com` for those stores (so `amzn.to` links work), else the product link's host without `www.`.
 2. Store policy page: MCP `search_engine` with `"<domain> return policy"` → first result on the store's own domain, preferring links with "return" or "refund" → `scrape_as_markdown`. Pages over 6,000 chars keep only lines about returns, refunds and days. Cached per domain for 24 h.
-3. Product page: `scrape_as_markdown` on the item link, keeping only lines with return / refund / replace (≤ 2,000 chars), since a product can override the store default ("Non-returnable", "Returnable until Jan 31"). Optional: a failed scrape is cached as empty and the store policy alone answers. Cached per link for 24 h.
+3. Product page, since a product can override the store default ("Non-returnable", "Returnable until Jan 31"): Amazon and Walmart use the same Scraper API record as the price agent (`bd.scrape`) and keep every field that mentions return / refund / replace; other stores use `scrape_as_markdown` and keep those lines (≤ 2,000 chars). Optional: a failed scrape is cached as empty and the store policy alone answers. Cached per link for 24 h. **Unconfirmed:** which return fields the Amazon/Walmart records have; `uv run price_agent.py --check <url>` prints all keys.
 4. `asi1` (temperature 0, JSON schema) reads both and returns `returnable`, `return_days`, `price_adjust_days`, `summary`. Days outside 0–365 become `None`.
 
-**Coordinator side (next):** send the same `TrackItem` to `POLICY_AGENT_ADDRESS` next to the price check; refundable until = purchase date (else `added_at`) + `return_days`. `TrackItem` has no purchase date, so the policy agent returns the window and the coordinator does the date math. Show `summary` and the deadline on the detail card; `price_adjust_days == 0` means a return-and-rebuy is the only way to get the drop back.
+**Coordinator side:** `track_new_item` sends the same `TrackItem` to `POLICY_AGENT_ADDRESS` next to the price check. `TrackItem` has no purchase date, so the policy agent returns the window and the coordinator does the date math: return by = `items.purchase_date` (from the receipt) else `added_at` + `return_days`. `PolicyResult` is saved on the item (`store.save_policy`); the detail card gets "Return by" (or "Not returnable"), "Price adjustment" and "Policy" rows. If the price card was already shown, it's re-sent with those rows; if not, the price card includes them. A failed policy check is logged and the card just leaves the rows out.
 
 **Rules**
 - MCP session URL holds the token: errors are reported by type only, never the exception text or traceback.

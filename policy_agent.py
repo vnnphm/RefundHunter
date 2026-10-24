@@ -4,29 +4,25 @@ import os
 import re
 import sys
 import time
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from openai import APIError, AsyncOpenAI
 from uagents import Agent, Context
 
+from asi import LLMError, ask_json
+from bd import DATASETS, ScrapeError, call, mcp_error, mcp_session, scrape
 from models import PolicyResult, TrackItem
 
 load_dotenv()
 
-BD_MCP = "https://mcp.brightdata.com/mcp"
 MCP_TOOLS = "search_engine,scrape_as_markdown"  # load only what we call
-MCP_TIMEOUT_S = 120
-ASI_API = "https://api.asi1.ai/v1"
-MODEL = "asi1"
 DOMAINS = {"amazon": "amazon.com", "walmart": "walmart.com"}  # amzn.to links etc. read amazon.com's policy
 POLICY_LIMIT = 6000   # chars of the store's policy page sent to asi1
 PRODUCT_LIMIT = 2000  # chars of return lines from the product page
 CACHE_TTL_S = 24 * 3600  # policies rarely change and credits are shared: one scrape per store/link a day
+RETURN_WORDS = re.compile(r"return|refund|replace", re.I)
 KEYWORDS = re.compile(r"return|refund|replace|exchange|price (adjust|match|protect|guarantee)|\bdays?\b", re.I)
 
 SEED = os.getenv("POLICY_AGENT_SEED", "")
@@ -71,38 +67,11 @@ _policies: dict[str, tuple[float, str, str]] = {}  # domain -> (time, policy url
 _products: dict[str, tuple[float, str]] = {}       # product url -> (time, return lines)
 
 
-class PolicyError(Exception):
-    """A short, user-safe reason the policy check failed."""
+class PolicyError(ScrapeError):
+    """A short, user-safe reason the policy check failed. A ScrapeError so mcp_error() keeps it."""
 
 
-# ---- Bright Data MCP ---------------------------------------------------------
-
-@asynccontextmanager
-async def bright_data():
-    """One MCP session for all calls of a check. The URL holds the token: never log it."""
-    token = os.getenv("BRIGHTDATA_API_TOKEN", "")
-    if not token:
-        raise PolicyError("BRIGHTDATA_API_TOKEN is not set")
-    async with streamable_http_client(f"{BD_MCP}?token={token}&tools={MCP_TOOLS}") as (read, write):
-        async with ClientSession(read, write) as s:
-            await s.initialize()
-            yield s
-
-
-async def call(s: ClientSession, tool: str, args: dict) -> str:
-    """Run one Bright Data tool (1 credit) and return its text."""
-    res = await s.call_tool(tool, args, read_timeout_seconds=MCP_TIMEOUT_S)
-    if getattr(res, "is_error", False):
-        raise PolicyError(f"Bright Data {tool} failed")
-    return "\n".join(getattr(c, "text", "") for c in getattr(res, "content", None) or [])
-
-
-def bright_data_error(e: BaseException) -> PolicyError:
-    """MCP errors arrive wrapped in task-group ExceptionGroups: keep ours, name the others by type."""
-    while isinstance(e, BaseExceptionGroup):
-        e = next((x for x in e.exceptions if isinstance(x, (PolicyError, BaseExceptionGroup))), e.exceptions[0])
-    return e if isinstance(e, PolicyError) else PolicyError(f"couldn't reach Bright Data: {type(e).__name__}")
-
+# ---- Bright Data ---------------------------------------------------------
 
 def domain_for(url: str, shop: str) -> str:
     if shop in DOMAINS:
@@ -143,18 +112,33 @@ async def store_policy(s: ClientSession, domain: str) -> tuple[str, str]:
     return url, text
 
 
-async def product_returns(s: ClientSession, url: str, log=print) -> str:
-    """Return lines from the product page ("Non-returnable", "Returnable until …"). Optional: "" on failure."""
+def record_returns(rec, key: str = "") -> list[str]:
+    """Every "field: value" in a Scraper API record that mentions returns, however deeply nested."""
+    if isinstance(rec, dict):
+        return [line for k, v in rec.items() for line in record_returns(v, f"{key}.{k}" if key else str(k))]
+    if isinstance(rec, list):
+        return [line for v in rec for line in record_returns(v, key)]
+    text = f"{key}: {rec}"
+    return [text] if rec not in (None, "") and RETURN_WORDS.search(text) and len(text) < 400 else []
+
+
+async def product_returns(s: ClientSession, url: str, shop: str, log=print) -> str:
+    """Return lines from the product ("Non-returnable", "Returnable until …"). Optional: "" on failure.
+
+    Amazon and Walmart: the same Scraper API record the price agent reads (structured, 1 credit).
+    Other stores: the product page as markdown through the MCP (1 credit)."""
     cached = _products.get(url)
     if cached and time.time() - cached[0] < CACHE_TTL_S:
         return cached[1]
     try:
-        page = await call(s, "scrape_as_markdown", {"url": url})
+        if shop in DATASETS:
+            page = "\n".join(record_returns(await scrape(url, DATASETS[shop])))
+        else:
+            page = await call(s, "scrape_as_markdown", {"url": url})
     except Exception as e:  # the store policy alone still answers the question
         log(f"product page skipped: {type(e).__name__}")
         page = ""  # cached too: don't spend a credit on the same broken link again
-    lines = [line.strip() for line in page.splitlines()
-             if re.search(r"return|refund|replace", line, re.I) and len(line) < 400]
+    lines = [line.strip() for line in page.splitlines() if RETURN_WORDS.search(line) and len(line) < 400]
     text = "\n".join(lines)[:PRODUCT_LIMIT]
     _products[url] = (time.time(), text)
     return text
@@ -163,31 +147,13 @@ async def product_returns(s: ClientSession, url: str, log=print) -> str:
 # ---- asi1 --------------------------------------------------------------------
 
 async def read_policy(domain: str, policy: str, product: str) -> dict:
-    key = os.getenv("ASI_ONE_API_KEY", "")
-    if not key:
-        raise PolicyError("ASI_ONE_API_KEY is not set")
     text = f"{PROMPT}\n\nStore: {domain}\n\nStore policy page:\n{policy}"
     if product:
         text += f"\n\nProduct page lines about returns:\n{product}"
-    llm = AsyncOpenAI(api_key=key, base_url=ASI_API)
     try:
-        r = await llm.chat.completions.create(
-            model=MODEL, temperature=0,
-            response_format={"type": "json_schema", "json_schema": SCHEMA},
-            messages=[{"role": "user", "content": text}])
-    except APIError as e:
-        raise PolicyError(f"ASI:One error: {type(e).__name__}") from e
-    finally:
-        await llm.close()
-    out = (r.choices[0].message.content or "").strip()
-    out = out.removeprefix("`" * 3 + "json").strip("`\n ")  # drop a markdown fence if present
-    try:
-        data = json.loads(out)
-    except ValueError as e:
-        raise PolicyError("ASI:One didn't return JSON") from e
-    if not isinstance(data, dict):
-        raise PolicyError("ASI:One didn't return JSON")
-    return data
+        return await ask_json(text, SCHEMA)
+    except LLMError as e:
+        raise PolicyError(str(e)) from e
 
 
 def to_days(value) -> int | None:
@@ -208,11 +174,11 @@ async def get_policy(req: TrackItem, log=print) -> PolicyResult:
         return PolicyResult(item_id=req.item_id, ok=False, checked_at=now, error="no store in that link")
     try:
         try:
-            async with bright_data() as s:
+            async with mcp_session(MCP_TOOLS) as s:
                 url, policy = await store_policy(s, domain)
-                product = await product_returns(s, req.product_url, log)
-        except Exception as e:
-            raise bright_data_error(e) from None  # from None: the cause can carry the token URL
+                product = await product_returns(s, req.product_url, req.store, log)
+        except Exception as e:  # from None: the cause can carry the token URL
+            raise PolicyError(str(mcp_error(e))) from None
         data = await read_policy(domain, policy, product)
     except PolicyError as e:
         return PolicyResult(item_id=req.item_id, ok=False, checked_at=now, error=str(e))
@@ -242,7 +208,7 @@ async def on_track(ctx: Context, sender: str, req: TrackItem):
 
 async def list_tools():
     """Step 0 in AGENTS.md: print the MCP tools we load and their inputs. Costs no credits."""
-    async with bright_data() as s:
+    async with mcp_session(MCP_TOOLS) as s:
         for t in (await s.list_tools()).tools:
             print(t.name, json.dumps(t.inputSchema))
 
