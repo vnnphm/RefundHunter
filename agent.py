@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -21,9 +22,13 @@ load_dotenv()
 # Empty until the price agent is running: the coordinator mocks PriceResult instead.
 PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 
+SEED = os.getenv("AGENT_SEED", "")
+if not SEED or SEED.startswith("change-me"):
+    sys.exit("Set your own AGENT_SEED in .env (see README). Same seed = same address as someone else.")
+
 agent = Agent(
     name="refund-hunter",
-    seed=os.environ["AGENT_SEED"],  # keep fixed: it sets the agent's address
+    seed=SEED,  # keep fixed: it sets the agent's address
     port=8001,
     mailbox=True,
 )

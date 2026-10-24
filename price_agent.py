@@ -22,9 +22,13 @@ PRICE_FIELDS = ("final_price", "price", "initial_price")
 POLL_LIMIT_S = 180
 CACHE_TTL_S = 600  # free tier credits are shared: don't re-scrape a URL for 10 min
 
+SEED = os.getenv("PRICE_AGENT_SEED", "")
+if not SEED or SEED.startswith("change-me"):
+    sys.exit("Set your own PRICE_AGENT_SEED in .env (see README). Same seed = same address as someone else.")
+
 agent = Agent(
     name="refund-hunter-price",
-    seed=os.environ["PRICE_AGENT_SEED"],
+    seed=SEED,  # keep fixed: it sets the agent's address
     port=8002,
     mailbox=True,
 )
