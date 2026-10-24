@@ -1,13 +1,309 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Refund Hunter — Demo Prototype</title>
-<style>
-:root{--bg:#0b111b;--panel:#121b29;--panel2:#172334;--stroke:#263549;--text:#f0f5fc;--muted:#9baabe;--mint:#43e0a1;--blue:#71a9ff;--amber:#e8bd75;--r:18px}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 18% -10%,#16344a 0%,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}button,input,select{font:inherit}button{cursor:pointer}.shell{max-width:1280px;margin:auto;padding:24px 28px}.top{display:flex;justify-content:space-between;align-items:center;padding-bottom:22px;border-bottom:1px solid var(--stroke);gap:14px}.brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:18px;letter-spacing:-.3px}.logo{height:38px;width:38px;border-radius:12px;display:grid;place-items:center;color:#092117;font-size:22px;background:linear-gradient(145deg,#78f8bd,#20ba8b)}.tag{border:1px solid #305b50;border-radius:50px;padding:5px 12px;color:#b6f7db;background:#16362c;font-size:12px;font-weight:700}.topRight{display:flex;gap:10px;align-items:center}.ghost{border:1px solid var(--stroke);border-radius:12px;background:var(--panel2);color:var(--text);padding:9px 13px}.hero{display:flex;justify-content:space-between;align-items:end;padding:32px 0 26px;gap:16px}.eyebrow{text-transform:uppercase;letter-spacing:2px;color:var(--mint);font-size:12px;font-weight:800}.hero h1{font-size:clamp(32px,4.1vw,56px);line-height:1.06;letter-spacing:-2px;margin:8px 0 10px}.hero p{color:var(--muted);margin:0;max-width:560px}.stat{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.live{height:8px;width:8px;background:var(--mint);border-radius:50%;box-shadow:0 0 12px #43e0a1}.layout{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(350px,.8fr);gap:18px}.panel{border:1px solid var(--stroke);border-radius:20px;background:linear-gradient(155deg,#142030,#101926);box-shadow:0 18px 60px #0003;overflow:hidden}.panelhead{padding:18px 21px;border-bottom:1px solid var(--stroke);display:flex;align-items:center;justify-content:space-between;gap:12px}.panelhead strong{font-size:14px}.sub{color:var(--muted);font-size:12px}.chat{min-height:415px;max-height:520px;overflow-y:auto;padding:22px;display:flex;flex-direction:column;gap:14px}.bubble{border-radius:15px;padding:13px 16px;max-width:86%;font-size:14px}.assistant{align-self:flex-start;background:#1b2939;border:1px solid #2c3c51}.user{align-self:flex-end;background:#1d473d;border:1px solid #32675a}.bubble small{display:block;color:var(--muted);margin-bottom:5px}.composer{border-top:1px solid var(--stroke);padding:15px 20px;display:grid;gap:12px}.inputs{display:grid;grid-template-columns:1fr 110px 140px;gap:9px}input,select{width:100%;background:#0b1420;color:var(--text);border:1px solid #344358;border-radius:10px;padding:11px;outline:0;min-width:0}input:focus{border-color:var(--mint)}.buttons{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.primary{background:var(--mint);color:#07231b;border:0;border-radius:11px;padding:11px 19px;font-weight:800}.primary:disabled{opacity:.55;cursor:default}.hint{color:var(--muted);font-size:12px}.flow{padding:21px;display:grid;gap:10px}.step{background:#0e1826;border:1px solid #2a384c;border-radius:13px;padding:14px;display:flex;align-items:center;gap:13px;transition:.2s}.step.active{border-color:#4be2aa;background:#153229;box-shadow:0 0 0 1px #2b8b67}.step.done .n{background:#205340;color:#a6f7ce}.n{height:34px;width:34px;flex:none;background:#202f43;color:#a7bdd4;display:grid;place-items:center;border-radius:10px;font-weight:800}.step b{font-size:13px}.step p{color:var(--muted);font-size:12px;margin:3px 0 0}.arrow{height:15px;text-align:center;line-height:15px;color:#54718d}.result{border-radius:15px;background:linear-gradient(115deg,#153d34,#142b31);border:1px solid #31705d;margin:0 21px 21px;padding:19px;display:none}.result.show{display:block}.result .amount{font-size:43px;font-weight:850;letter-spacing:-2px;color:var(--mint);line-height:1.1}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}.metric{padding:12px;border:1px solid #305347;border-radius:10px}.metric small{color:#aacac2;display:block}.metric b{font-size:20px}.note{color:#b8d3c9;font-size:12px;margin-top:14px}.footer{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:23px 0;color:var(--muted);font-size:12px}.pill{display:inline-block;background:#293548;border-radius:50px;padding:4px 9px;font-size:11px;color:#c2d0dd}.toast{border:1px solid #4d603e;background:#2e3928;border-radius:12px;padding:11px 15px;font-size:12px;color:#dfe9ce;display:none}.toast.show{display:block}.script{padding:14px 20px;border-top:1px solid var(--stroke);color:var(--muted);font-size:12px}.legend{display:flex;align-items:center;gap:8px}.kicker{color:var(--mint);font-size:11px;font-weight:800;letter-spacing:1.3px}.narrative{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}.mini{border:1px solid var(--stroke);border-radius:13px;padding:15px;background:#101a27}.mini span{font-size:12px;color:var(--mint);font-weight:700}.mini b{display:block;margin:3px 0;font-size:14px}.mini p{font-size:12px;color:var(--muted);margin:0}@media(max-width:950px){.layout{grid-template-columns:1fr}.hero{align-items:start}.inputs{grid-template-columns:1fr 1fr}.inputs input:first-child{grid-column:span 2}}@media(max-width:600px){.shell{padding:17px}.top,.hero{align-items:flex-start;flex-direction:column}.inputs{grid-template-columns:1fr}.inputs input:first-child{grid-column:span 1}.chat{min-height:340px}.narrative{grid-template-columns:1fr}.hero h1{letter-spacing:-1px}}
-</style></head>
-<body><div class="shell"><header class="top"><div class="brand"><div class="logo">↘</div>REFUND HUNTER <span class="tag">DEMO PROTOTYPE</span></div><div class="topRight"><span class="pill">Cal Hacks 13.0 · Fetch.ai Track</span><button class="ghost" id="reset">↺ Reset</button></div></header>
-<section class="hero"><div><div class="eyebrow">Your money. Found.</div><h1>Shopping doesn’t end<br>at checkout.</h1><p>A shopping recovery agent that checks purchases for price drops—and shows your next move, directly in an ASI:One-style chat.</p></div><div class="stat"><i class="live"></i> Click-through prototype · Simulated data</div></section>
-<div class="layout"><section class="panel"><div class="panelhead"><div><strong>◉ ASI:One / Refund Hunter</strong><div class="sub">User experience · clickable simulation</div></div><span class="pill">Agent chat</span></div><div class="chat" id="chat"><div class="bubble assistant"><small>Refund Hunter</small>Hey! Add a purchase and I’ll check whether its price has dropped. No email access needed for this demo.</div></div><div class="composer"><div class="inputs"><input id="url" aria-label="Product URL" value="https://www.amazon.com/dp/EXAMPLE" placeholder="Product URL"><input id="paid" aria-label="Purchase price" type="number" min="0" value="200" step="0.01"><select id="scenario" aria-label="Demo scenario"><option value="drop">Price drop</option><option value="same">No change</option><option value="fail">Tool failure</option></select></div><div class="buttons"><button id="run" class="primary">▶ Check my purchase</button><span class="hint">Try all 3 outcomes. No real APIs are called.</span></div></div><div class="script">Demo input: example headphones · original purchase price shown above · current price is simulated at $160 for “Price drop”.</div></section>
-<section class="panel"><div class="panelhead"><div><strong>Agent orchestration</strong><div class="sub">Intended Phase 1 architecture · visualization</div></div><span class="pill">Fetch.ai + Bright Data</span></div><div class="flow"><div class="step" id="s0"><div class="n">1</div><div><b>ASI:One → Coordinator Agent</b><p>Accepts purchase request via Agent Chat Protocol</p></div></div><div class="arrow">↓ TrackItem</div><div class="step" id="s1"><div class="n">2</div><div><b>Coordinator → Price Agent</b><p>Delegates price lookup as a structured message</p></div></div><div class="arrow">↓ External tool call</div><div class="step" id="s2"><div class="n">3</div><div><b>Price Agent → Bright Data</b><p>Gets current product pricing (mocked in this prototype)</p></div></div><div class="arrow">↓ PriceResult</div><div class="step" id="s3"><div class="n">4</div><div><b>Coordinator → ASI:One</b><p>Compares prices and returns an understandable result</p></div></div></div><div class="result" id="result"><div class="kicker" id="result-kicker">PRICE DROP DETECTED</div><div class="amount" id="amount">$40.00</div><div class="grid2"><div class="metric"><small>Original price</small><b id="orig">$200.00</b></div><div class="metric"><small>Current price</small><b id="current">$160.00</b></div></div><div class="note" id="result-note">Potential savings only. Refund eligibility has not been verified.</div></div></section></div>
-<div class="narrative"><div class="mini"><span>THE PROBLEM</span><b>Price drops go unnoticed.</b><p>Most shoppers don't check prices again after checkout.</p></div><div class="mini"><span>THE PRODUCT</span><b>Ask once. Let agents check.</b><p>One conversational entry point, delegated price checks, clear results.</p></div><div class="mini"><span>THE VISION</span><b>From discovery to recovery.</b><p>Later: receipt parsing, policy checks, user-approved claims.</p></div></div><footer class="footer"><span>Refund Hunter · Concept interface for presentation · Not connected to live Agentverse or Bright Data</span><span>Use with your live ASI:One demo once integrated</span></footer></div>
-<script>
-const $=id=>document.getElementById(id), wait=ms=>new Promise(r=>setTimeout(r,ms));let busy=false;const money=n=>'$'+Number(n).toFixed(2);function bubble(role,html){const div=document.createElement('div');div.className='bubble '+role;div.innerHTML=html;$('chat').append(div);$('chat').scrollTop=$('chat').scrollHeight}function mark(i){for(let k=0;k<4;k++){let e=$('s'+k);e.classList.toggle('done',k<i);e.classList.toggle('active',k===i)}}function clearSteps(){for(let k=0;k<4;k++)$('s'+k).classList.remove('active','done');$('result').classList.remove('show')}async function run(){if(busy)return;busy=true;$('run').disabled=true;clearSteps();const paid=Number($('paid').value),sc=$('scenario').value,url=$('url').value.trim();if(!(paid>0)||!url){bubble('assistant','Please enter a product URL and a positive purchase price.');busy=false;$('run').disabled=false;return}bubble('user',`Check this purchase: <b>${url.replaceAll('&','&amp;').replaceAll('<','&lt;')}</b><br>Paid: ${money(paid)}`);mark(0);await wait(650);bubble('assistant','Checking the current price now…');mark(1);await wait(820);mark(2);await wait(980);mark(3);if(sc==='fail'){bubble('assistant','<small>Refund Hunter · Price check unavailable</small>Bright Data price lookup failed in this simulated scenario. No price comparison can be confirmed. Please try again later.');$('result').classList.remove('show')}else{const cur=sc==='drop'?Math.max(0,paid-40):paid;const diff=paid-cur;$('result').classList.add('show');$('result-kicker').textContent=diff>1?'PRICE DROP DETECTED':'NO MEANINGFUL PRICE DROP';$('amount').textContent=diff>1?money(diff):money(0);$('orig').textContent=money(paid);$('current').textContent=money(cur);$('result-note').textContent=diff>1?'Potential savings only. Refund eligibility has not been verified.':'No price adjustment indicated by this simulated result.';bubble('assistant',`<small>Refund Hunter · Check complete</small><b>${diff>1?'Potential savings found: '+money(diff):'No meaningful price drop found.'}</b><br>Purchase price: ${money(paid)}<br>Current price (simulated): ${money(cur)}<br><br><span style="color:#a9becf">${diff>1?'Next step: confirm the retailer’s price-adjustment policy before requesting a refund.':'No further action suggested right now.'}</span>`)}await wait(250);for(let k=0;k<4;k++){$('s'+k).classList.add('done');$('s'+k).classList.remove('active')}$('run').disabled=false;busy=false}$('run').addEventListener('click',run);$('reset').addEventListener('click',()=>{if(busy)return;$('chat').innerHTML='<div class="bubble assistant"><small>Refund Hunter</small>Hey! Add a purchase and I’ll check whether its price has dropped. No email access needed for this demo.</div>';clearSteps()});
-</script></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Refund Hunter Demo</title>
+  <style>
+    :root {
+      --bg:#0b111b;--panel:#121b29;--panel2:#172334;--stroke:#263549;--text:#f0f5fc;--muted:#9baabe;
+      --mint:#43e0a1;--blue:#71a9ff;--amber:#e8bd75;--danger:#ff9d9d;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(ellipse at 18% -10%,#16344a 0%,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+    button,input,select{font:inherit}
+    button{cursor:pointer}
+    .shell{max-width:1280px;margin:auto;padding:24px 28px}
+    .top{display:flex;justify-content:space-between;align-items:center;padding-bottom:18px;border-bottom:1px solid var(--stroke);gap:14px}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:18px}
+    .logo{height:38px;width:38px;border-radius:12px;display:grid;place-items:center;color:#092117;font-size:22px;background:linear-gradient(145deg,#78f8bd,#20ba8b)}
+    .tag{border:1px solid #305b50;border-radius:50px;padding:5px 12px;color:#b6f7db;background:#16362c;font-size:12px;font-weight:700}
+    .ghost{border:1px solid var(--stroke);border-radius:12px;background:var(--panel2);color:var(--text);padding:9px 13px}
+    .hero{display:flex;justify-content:space-between;align-items:end;padding:28px 0 24px;gap:16px}
+    .hero h1{font-size:clamp(28px,4vw,52px);line-height:1.06;letter-spacing:-1.5px;margin:8px 0}
+    .hero p{color:var(--muted);margin:0;max-width:620px}
+    .live{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+    .dot{height:8px;width:8px;border-radius:50%;background:var(--mint);box-shadow:0 0 12px #43e0a1}
+    .layout{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(360px,.85fr);gap:18px}
+    .panel{border:1px solid var(--stroke);border-radius:20px;background:linear-gradient(155deg,#142030,#101926);box-shadow:0 18px 60px #0003;overflow:hidden}
+    .panelhead{padding:16px 20px;border-bottom:1px solid var(--stroke);display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .sub{color:var(--muted);font-size:12px}
+    .pill{display:inline-block;background:#293548;border-radius:50px;padding:4px 9px;font-size:11px;color:#c2d0dd}
+
+    .chat{min-height:420px;max-height:560px;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+    .bubble{border-radius:15px;padding:12px 15px;max-width:90%;font-size:14px}
+    .assistant{align-self:flex-start;background:#1b2939;border:1px solid #2c3c51}
+    .user{align-self:flex-end;background:#1d473d;border:1px solid #32675a}
+    .bubble small{display:block;color:var(--muted);margin-bottom:4px}
+
+    .composer{border-top:1px solid var(--stroke);padding:14px 18px;display:grid;gap:10px}
+    .inputs{display:grid;grid-template-columns:1fr 120px 130px;gap:8px}
+    .inputs2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    input,select{width:100%;background:#0b1420;color:var(--text);border:1px solid #344358;border-radius:10px;padding:10px;outline:0}
+    input:focus,select:focus{border-color:var(--mint)}
+    .buttons{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .primary{background:var(--mint);color:#07231b;border:0;border-radius:11px;padding:10px 18px;font-weight:800}
+    .primary:disabled{opacity:.55;cursor:default}
+    .hint{color:var(--muted);font-size:12px}
+
+    .flow{padding:18px;display:grid;gap:8px}
+    .step{background:#0e1826;border:1px solid #2a384c;border-radius:13px;padding:11px 12px;display:flex;align-items:center;gap:12px;transition:.2s}
+    .step.active{border-color:#4be2aa;background:#153229}
+    .step.done .n{background:#205340;color:#a6f7ce}
+    .n{height:30px;width:30px;flex:none;background:#202f43;color:#a7bdd4;display:grid;place-items:center;border-radius:10px;font-weight:800;font-size:12px}
+    .step b{font-size:13px}
+    .step p{color:var(--muted);font-size:12px;margin:2px 0 0}
+
+    .result{border-radius:15px;background:linear-gradient(115deg,#153d34,#142b31);border:1px solid #31705d;margin:0 18px 18px;padding:16px;display:none}
+    .result.show{display:block}
+    .result h3{margin:0 0 8px;font-size:14px;letter-spacing:.4px;color:#b4f5dc}
+    .amount{font-size:36px;font-weight:850;letter-spacing:-1px;color:var(--mint);line-height:1.1}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+    .metric{padding:10px;border:1px solid #305347;border-radius:10px}
+    .metric small{color:#aacac2;display:block}
+    .metric b{font-size:18px}
+    .policy{margin-top:12px;padding:11px;border:1px solid #3a4f66;border-radius:10px;background:#102031}
+    .policy b{display:block}
+    .policy small{color:var(--muted)}
+    .policy.warn{border-color:#6a5438;background:#241f17}
+    .policy.bad{border-color:#664247;background:#24161a}
+
+    .narrative{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}
+    .mini{border:1px solid var(--stroke);border-radius:13px;padding:14px;background:#101a27}
+    .mini span{font-size:12px;color:var(--mint);font-weight:700}
+    .mini b{display:block;margin:3px 0;font-size:14px}
+    .mini p{font-size:12px;color:var(--muted);margin:0}
+
+    @media(max-width:960px){.layout{grid-template-columns:1fr}.inputs{grid-template-columns:1fr 1fr}.inputs input:first-child{grid-column:span 2}}
+    @media(max-width:680px){.shell{padding:16px}.hero,.top{flex-direction:column;align-items:flex-start}.inputs,.inputs2{grid-template-columns:1fr}.inputs input:first-child{grid-column:span 1}.narrative{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand"><div class="logo">↘</div>REFUND HUNTER <span class="tag">DEMO</span></div>
+      <div>
+        <span class="pill">Cal Hacks 13.0 · Fetch.ai</span>
+        <button class="ghost" id="reset">↺ Reset</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <div class="sub" style="text-transform:uppercase;letter-spacing:2px;color:var(--mint);font-weight:800">Phase 1 + Phase 3</div>
+        <h1>价格检测 + Policy 判断<br/>一页演示实现效果</h1>
+        <p>这个 Demo 页直接展示当前仓库功能：Coordinator 异步查价，降价后再触发 Policy Agent，返回 eligible / not_eligible / unknown / unsupported。</p>
+      </div>
+      <div class="live"><i class="dot"></i> Simulated UI · 映射真实 agent 消息流</div>
+    </section>
+
+    <div class="layout">
+      <section class="panel">
+        <div class="panelhead">
+          <div><strong>◉ ASI:One / Refund Hunter</strong><div class="sub">Chat + Card 行为模拟</div></div>
+          <span class="pill">Coordinator UI</span>
+        </div>
+        <div class="chat" id="chat">
+          <div class="bubble assistant"><small>Refund Hunter</small>你好！发商品链接和购买价，我会先查当前价；如果有明显降价，再自动触发 Policy 检查。</div>
+        </div>
+        <div class="composer">
+          <div class="inputs">
+            <input id="url" value="https://www.amazon.com/dp/EXAMPLE" placeholder="Product URL" />
+            <input id="paid" type="number" min="0" value="200" step="0.01" placeholder="Paid" />
+            <select id="store">
+              <option value="amazon">amazon</option>
+              <option value="walmart">walmart</option>
+              <option value="other">other</option>
+            </select>
+          </div>
+          <div class="inputs2">
+            <input id="purchaseDate" value="2026-10-10" placeholder="YYYY-MM-DD" />
+            <select id="scenario">
+              <option value="eligible">降价 + 窗口内 (eligible)</option>
+              <option value="expired">降价 + 超过窗口 (not_eligible)</option>
+              <option value="unknown_date">降价 + 缺失日期 (unknown)</option>
+              <option value="no_drop">无降价 (policy 不触发)</option>
+              <option value="unsupported">降价 + 不支持商店 (unsupported)</option>
+              <option value="price_fail">价格查询失败</option>
+            </select>
+          </div>
+          <div class="buttons">
+            <button id="run" class="primary">▶ 运行演示</button>
+            <span class="hint">用于路演：一键展示价格链路 + policy 链路如何落地。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panelhead">
+          <div><strong>Agent orchestration</strong><div class="sub">与当前代码实现一致的消息流</div></div>
+          <span class="pill">uAgents</span>
+        </div>
+        <div class="flow">
+          <div class="step" id="s0"><div class="n">1</div><div><b>User → Coordinator</b><p>提交 product_url + price_paid (+ purchase_date)</p></div></div>
+          <div class="step" id="s1"><div class="n">2</div><div><b>Coordinator → Price Agent</b><p>发送 TrackItem；先返回“Checking price…”</p></div></div>
+          <div class="step" id="s2"><div class="n">3</div><div><b>PriceResult → Coordinator</b><p>降价阈值：price_paid - current_price &gt; 1</p></div></div>
+          <div class="step" id="s3"><div class="n">4</div><div><b>Coordinator → Policy Agent</b><p>仅在降价时发送 PolicyRequest（异步）</p></div></div>
+          <div class="step" id="s4"><div class="n">5</div><div><b>PolicyResult → User</b><p>eligible / not_eligible / unknown / unsupported</p></div></div>
+        </div>
+        <div class="result" id="result">
+          <h3 id="resultTitle">PRICE RESULT</h3>
+          <div class="amount" id="amount">$0.00</div>
+          <div class="grid2">
+            <div class="metric"><small>You paid</small><b id="orig">$0.00</b></div>
+            <div class="metric"><small>Current price</small><b id="current">$0.00</b></div>
+          </div>
+          <div class="policy" id="policyBox">
+            <b id="policyStatus">Policy: waiting</b>
+            <small id="policyText">仅当降价成立时触发 Policy Agent。</small>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="narrative">
+      <div class="mini"><span>已实现</span><b>Price Agent + Parser Agent + Policy Agent</b><p>每个 agent 单文件、单职责、单 seed；Coordinator 统一对话入口。</p></div>
+      <div class="mini"><span>本页体现</span><b>从“发现降价”到“是否可申请”</b><p>演示不阻塞聊天：先回价格，再补发 policy 结果。</p></div>
+      <div class="mini"><span>风险提示</span><b>Policy 为 demo heuristic</b><p>结果仅作演示 guidance，不是商家政策承诺。</p></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const money = n => '$' + Number(n).toFixed(2);
+    let busy = false;
+
+    function bubble(role, html) {
+      const div = document.createElement('div');
+      div.className = 'bubble ' + role;
+      div.innerHTML = html;
+      $('chat').append(div);
+      $('chat').scrollTop = $('chat').scrollHeight;
+    }
+
+    function resetSteps() {
+      for (let i = 0; i < 5; i++) $('s' + i).classList.remove('active', 'done');
+      $('result').classList.remove('show');
+      $('policyBox').className = 'policy';
+    }
+
+    function mark(index) {
+      for (let i = 0; i < 5; i++) {
+        const step = $('s' + i);
+        step.classList.toggle('done', i < index);
+        step.classList.toggle('active', i === index);
+      }
+    }
+
+    function setPolicyBox(kind, title, text) {
+      const box = $('policyBox');
+      box.className = 'policy' + (kind === 'warn' ? ' warn' : kind === 'bad' ? ' bad' : '');
+      $('policyStatus').textContent = title;
+      $('policyText').textContent = text;
+    }
+
+    function deriveCurrentPrice(paid, scenario) {
+      if (scenario === 'no_drop') return paid;
+      if (scenario === 'price_fail') return null;
+      return Math.max(0, paid - 40);
+    }
+
+    async function run() {
+      if (busy) return;
+      busy = true;
+      $('run').disabled = true;
+      resetSteps();
+
+      const paid = Number($('paid').value);
+      const url = $('url').value.trim();
+      const store = $('store').value;
+      const purchaseDate = $('purchaseDate').value.trim();
+      const scenario = $('scenario').value;
+
+      if (!(paid > 0) || !url) {
+        bubble('assistant', '请填写有效商品链接和正数购买价。');
+        busy = false;
+        $('run').disabled = false;
+        return;
+      }
+
+      bubble('user', `Track item: <b>${url.replaceAll('&','&amp;').replaceAll('<','&lt;')}</b><br/>store: ${store} · paid: ${money(paid)} · purchase_date: ${purchaseDate || '(empty)'}`);
+
+      mark(0);
+      await wait(500);
+      bubble('assistant', '<small>Coordinator</small>已收到，先帮你查当前价格…');
+
+      mark(1);
+      await wait(700);
+      mark(2);
+      await wait(700);
+
+      const currentPrice = deriveCurrentPrice(paid, scenario);
+      if (currentPrice === null) {
+        bubble('assistant', '<small>PriceResult</small>价格查询失败（模拟 Bright Data 异常），请稍后重试。');
+        $('result').classList.remove('show');
+        for (let i = 0; i < 5; i++) $('s' + i).classList.add('done');
+        $('s3').classList.remove('done');
+        $('s4').classList.remove('done');
+        busy = false;
+        $('run').disabled = false;
+        return;
+      }
+
+      const diff = paid - currentPrice;
+      $('result').classList.add('show');
+      $('orig').textContent = money(paid);
+      $('current').textContent = money(currentPrice);
+      $('amount').textContent = diff > 1 ? money(diff) : money(0);
+      $('resultTitle').textContent = diff > 1 ? 'PRICE DROP DETECTED' : 'NO MEANINGFUL DROP';
+
+      bubble('assistant', `<small>PriceResult</small>${diff > 1 ? `检测到降价 ${money(diff)}` : '当前未发现明显降价'}。`);
+
+      if (diff <= 1) {
+        setPolicyBox('warn', 'Policy: skipped', '无降价时不触发 Policy Agent（与当前实现一致）。');
+        bubble('assistant', '<small>Coordinator</small>目前不建议发起价保/退款申请。');
+        for (let i = 0; i < 5; i++) $('s' + i).classList.add('done');
+        $('s3').classList.remove('done');
+        $('s4').classList.remove('done');
+        busy = false;
+        $('run').disabled = false;
+        return;
+      }
+
+      mark(3);
+      await wait(650);
+      mark(4);
+      await wait(650);
+
+      if (scenario === 'unsupported' || store === 'other') {
+        setPolicyBox('warn', 'Policy: unsupported', '该商店暂未实现策略判断，返回 unsupported。');
+        bubble('assistant', '<small>PolicyResult</small>unsupported：该商店暂不支持自动 policy 判断。');
+      } else if (scenario === 'unknown_date' || !purchaseDate) {
+        setPolicyBox('warn', 'Policy: unknown', '购买日期缺失/非法，安全返回 unknown。');
+        bubble('assistant', '<small>PolicyResult</small>unknown：购买日期不完整，建议人工核对政策页。');
+      } else if (scenario === 'expired') {
+        setPolicyBox('bad', 'Policy: not_eligible', '已超过 demo window，返回 not_eligible。');
+        bubble('assistant', '<small>PolicyResult</small>not_eligible：超出演示策略窗口。');
+      } else {
+        setPolicyBox('', 'Policy: eligible', '窗口内且有明显降价，返回 eligible（demo heuristic）。');
+        bubble('assistant', '<small>PolicyResult</small>eligible：你可能仍在可申请窗口内（仅 demo heuristic）。');
+      }
+
+      for (let i = 0; i < 5; i++) {
+        $('s' + i).classList.add('done');
+        $('s' + i).classList.remove('active');
+      }
+      busy = false;
+      $('run').disabled = false;
+    }
+
+    $('run').addEventListener('click', run);
+    $('reset').addEventListener('click', () => {
+      if (busy) return;
+      $('chat').innerHTML = '<div class="bubble assistant"><small>Refund Hunter</small>你好！发商品链接和购买价，我会先查当前价；如果有明显降价，再自动触发 Policy 检查。</div>';
+      resetSteps();
+    });
+  </script>
+</body>
+</html>
