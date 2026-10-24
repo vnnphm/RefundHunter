@@ -15,7 +15,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 import store
-from models import ParsedReceipt, PriceResult, Receipt, TrackItem
+from models import ParsedReceipt, PolicyRequest, PolicyResult, PriceResult, Receipt, TrackItem
 
 load_dotenv()
 
@@ -23,6 +23,8 @@ load_dotenv()
 PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 # Empty until the parser agent is running: the coordinator mocks ParsedReceipt instead.
 PARSER_AGENT_ADDRESS = os.getenv("PARSER_AGENT_ADDRESS", "").strip()
+# Empty until the policy agent is running: the coordinator mocks PolicyResult instead.
+POLICY_AGENT_ADDRESS = os.getenv("POLICY_AGENT_ADDRESS", "").strip()
 # The email webhook (server.py); only it may send us Receipts.
 SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "").strip()
 # Shared Pipedream address users forward order emails to.
@@ -180,6 +182,26 @@ def price_detail(item: dict, mock: bool) -> dict:
     }
 
 
+def policy_detail(item: dict, result: PolicyResult, mock: bool) -> dict:
+    rows = [
+        {"label": "Status", "value": result.status.replace("_", " ").title() or "Unknown"},
+        {"label": "Store", "value": item["store"].title()},
+        {"label": "Policy", "value": result.policy_type or "demo_heuristic"},
+        {"label": "Summary", "value": result.explanation[:180] or "No policy explanation"},
+    ]
+    if result.deadline:
+        rows.append({"label": "Window ends", "value": result.deadline})
+    if result.source_url:
+        rows.append({"label": "Verify policy", "value": result.source_url})
+    if mock:
+        rows.append({"label": "Note", "value": "Test policy: policy agent not connected yet"})
+    return {
+        "title": item["name"] or "Refund policy check",
+        "summary_rows": rows,
+        "ctas": [{"label": "See all items", "selection": {"action": "list_items", "item_id": item["item_id"]}}],
+    }
+
+
 def items_carousel(items: list[dict]) -> dict:
     tiles = []
     for it in items[:10]:
@@ -300,6 +322,18 @@ def mock_price_result(req: TrackItem) -> PriceResult:
                        checked_at=datetime.now(timezone.utc).isoformat())
 
 
+def mock_policy_result(req: PolicyRequest) -> PolicyResult:
+    """Stand-in for the policy agent: conservative demo response only."""
+    return PolicyResult(
+        item_id=req.item_id,
+        ok=True,
+        status="unknown",
+        eligible=None,
+        policy_type="demo_heuristic_price_protection_window",
+        explanation="Policy agent not connected. This is a safe placeholder, not a real policy decision.",
+    )
+
+
 async def request_price(ctx: Context, req: TrackItem):
     if PRICE_AGENT_ADDRESS:
         await ctx.send(PRICE_AGENT_ADDRESS, req)
@@ -307,6 +341,24 @@ async def request_price(ctx: Context, req: TrackItem):
     ctx.logger.info(f"no PRICE_AGENT_ADDRESS, mocking price for {req.item_id}")
     await asyncio.sleep(2)  # feel like a real lookup
     await show_price(ctx, mock_price_result(req), mock=True)
+
+
+async def request_policy(ctx: Context, item: dict):
+    req = PolicyRequest(
+        item_id=item["item_id"],
+        user_id=item["user_id"],
+        store=item["store"],
+        product_url=item["product_url"],
+        purchase_date=item.get("purchase_date") or "",
+        price_paid=item["price_paid"],
+        current_price=item.get("current_price"),
+    )
+    if POLICY_AGENT_ADDRESS:
+        await ctx.send(POLICY_AGENT_ADDRESS, req)
+        return
+    ctx.logger.info(f"no POLICY_AGENT_ADDRESS, mocking policy for {req.item_id}")
+    await asyncio.sleep(1)
+    await show_policy(ctx, mock_policy_result(req), mock=True)
 
 
 async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
@@ -325,6 +377,21 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
     drop = item["price_paid"] - item["current_price"]
     headline = f"Price dropped ${drop:.2f}!" if drop > 1 else "No price drop yet."
     await ctx.send(user, card(headline, "detail", price_detail(item, mock)))
+    if drop > 1:
+        await ctx.send(user, reply("Checking whether this might still fit a refund/price-protection window…"))
+        await request_policy(ctx, item)
+
+
+async def show_policy(ctx: Context, result: PolicyResult, mock: bool = False):
+    item = store.get_item(result.item_id)
+    if item is None:
+        ctx.logger.warning(f"policy for unknown item {result.item_id}")
+        return
+    user = item["user_id"]
+    if not result.ok:
+        await ctx.send(user, reply("I couldn't assess policy eligibility right now. Please try again later."))
+        return
+    await ctx.send(user, card("Policy check complete.", "detail", policy_detail(item, result, mock)))
 
 
 @agent.on_message(model=PriceResult)
@@ -333,6 +400,14 @@ async def on_price_result(ctx: Context, sender: str, msg: PriceResult):
         ctx.logger.warning(f"ignoring PriceResult from unexpected sender {sender}")
         return
     await show_price(ctx, msg)
+
+
+@agent.on_message(model=PolicyResult)
+async def on_policy_result(ctx: Context, sender: str, msg: PolicyResult):
+    if sender != POLICY_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring PolicyResult from unexpected sender {sender}")
+        return
+    await show_policy(ctx, msg)
 
 
 # ---- Receipts ----------------------------------------------------------------
@@ -407,10 +482,10 @@ def find_receipt(sender: str, sel: dict, text: str) -> dict | None:
 # ---- Handlers ----------------------------------------------------------------
 
 async def track_new_item(ctx: Context, sender: str, url: str, price: float, name: str,
-                         item_id: str | None = None):
+                         item_id: str | None = None, purchase_date: str = ""):
     item_id = item_id or new_item_id()
     shop = store_for(url)
-    if not store.add_item(item_id, sender, url, shop, price, name):
+    if not store.add_item(item_id, sender, url, shop, price, name, purchase_date):
         await ctx.send(sender, reply("That item is already being tracked."))
         return
     ctx.logger.info(f"saved {item_id} ({shop}) for {sender}")
@@ -459,7 +534,9 @@ async def handle_text(ctx: Context, sender: str, text: str):
         store.set_receipt_status(rec["message_id"], "tracked")
         for it in rec["items"]:
             if valid_url(it["product_url"]):
-                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"])
+                await track_new_item(
+                    ctx, sender, it["product_url"], it["price_paid"], it["name"],
+                    purchase_date=rec.get("purchase_date") or "")
             else:  # paper receipts and some emails have no product link
                 await ctx.send(sender, card(f"What's the product link for {it['name'][:60]}?", "form",
                                             add_item_form(new_item_id(), "", it["price_paid"], it["name"])))

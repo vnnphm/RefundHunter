@@ -21,7 +21,7 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
 | Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data | `TrackItem` | `PriceResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
-| Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
+| Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `PolicyRequest` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
 
 Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pipedream, Bright Data.
@@ -88,6 +88,26 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     order_number: str = ""
     items: list[ReceiptItem] = []
     error: Optional[str] = None
+
+class PolicyRequest(Model):    # coordinator -> policy agent (Phase 3)
+    item_id: str
+    user_id: str
+    store: str
+    product_url: str
+    purchase_date: str = ""    # YYYY-MM-DD
+    price_paid: float
+    current_price: Optional[float] = None
+
+class PolicyResult(Model):     # policy agent -> coordinator
+    item_id: str
+    ok: bool
+    status: str = ""           # eligible | not_eligible | unknown | unsupported
+    eligible: Optional[bool] = None
+    deadline: str = ""         # YYYY-MM-DD
+    policy_type: str = ""
+    explanation: str = ""
+    source_url: str = ""
+    error: Optional[str] = None
 ```
 
 A price counts as dropped when `price_paid - current_price > 1` and `ok` is true.
@@ -108,9 +128,9 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `POLICY_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `PARSER_AGENT_ADDRESS`, `POLICY_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
-- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, email webhook (`server.py`) 8000.
+- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, policy agent 8004, email webhook (`server.py`) 8000.
 
 ## Run and connect
 
@@ -143,6 +163,11 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 
 **ASI:One LLM**
 - `OpenAI(api_key=os.getenv("ASI_ONE_API_KEY"), base_url="https://api.asi1.ai/v1")`, `model="asi1"`. No silent fallback to another provider.
+
+**Policy checks (Phase 3 demo)**
+- `policy_agent.py` evaluates only Amazon/Walmart with conservative demo heuristics.
+- The policy output is guidance for demos, not a legal/contractual merchant policy guarantee.
+- Unsupported stores and missing key fields must return `unsupported`/`unknown` with a safe explanation.
 
 **Payment Protocol** (Phase 3)
 - Send `RequestPayment` before any LLM call, or ASI:One shows plain text instead of the payment card.

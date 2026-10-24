@@ -43,3 +43,25 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     order_number: str = ""
     items: list[ReceiptItem] = []
     error: Optional[str] = None
+
+
+class PolicyRequest(Model):    # coordinator -> policy agent (Phase 3)
+    item_id: str
+    user_id: str
+    store: str                 # "amazon" | "walmart" | "other"
+    product_url: str
+    purchase_date: str = ""    # YYYY-MM-DD
+    price_paid: float
+    current_price: Optional[float] = None
+
+
+class PolicyResult(Model):     # policy agent -> coordinator
+    item_id: str
+    ok: bool
+    status: str = ""           # "eligible" | "not_eligible" | "unknown" | "unsupported"
+    eligible: Optional[bool] = None
+    deadline: str = ""         # YYYY-MM-DD
+    policy_type: str = ""      # demo heuristic name
+    explanation: str = ""      # user-safe reason
+    source_url: str = ""       # where to verify policy manually
+    error: Optional[str] = None

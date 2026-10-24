@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS items (
     price_paid    REAL NOT NULL,
     current_price REAL,
     checked_at    TEXT NOT NULL DEFAULT '',
-    added_at      TEXT NOT NULL
+    added_at      TEXT NOT NULL,
+    purchase_date TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS links (
     email     TEXT PRIMARY KEY,   -- lowercase
@@ -38,6 +39,7 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -45,15 +47,21 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _migrate(conn: sqlite3.Connection):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(items)")}
+    if "purchase_date" not in cols:
+        conn.execute("ALTER TABLE items ADD COLUMN purchase_date TEXT NOT NULL DEFAULT ''")
+
+
 def add_item(item_id: str, user_id: str, product_url: str, store: str,
-             price_paid: float, name: str = "") -> bool:
+             price_paid: float, name: str = "", purchase_date: str = "") -> bool:
     """Save a new item. Returns False if this item_id was already saved."""
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO items (item_id, user_id, product_url, store, name,"
-            " price_paid, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " price_paid, added_at, purchase_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (item_id, user_id, product_url, store, name, price_paid,
-             datetime.now(timezone.utc).isoformat()))
+             datetime.now(timezone.utc).isoformat(), purchase_date))
         return cur.rowcount == 1
 
 
