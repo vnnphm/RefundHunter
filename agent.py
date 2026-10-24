@@ -238,7 +238,7 @@ def parse_selection(text: str) -> dict:
         sel["action"] = "link_email"
     elif re.search(r"\brec(ei|ie)pts\b", lower):  # "any new receipts?" (or "reciepts")
         sel["action"] = "check_receipts"
-    elif re.search(r"\b(approved?|confirm(ed)?|track (these|this|them|it))\b", lower) and re.search(r"rec(ei|ie)pt", lower):
+    elif re.search(r"\b(approved?|confirm(ed)?|track(ing)? (these|this|them|it))\b", lower) and re.search(r"rec(ei|ie)pt", lower):
         sel["action"] = "track_receipt"
     elif re.search(r"\b(dismiss(ed)?|reject(ed)?|not now|cancel(led)?)\b", lower):
         sel["action"] = "dismiss_receipt"
@@ -536,6 +536,8 @@ async def on_message(ctx: Context, sender: str, msg: ChatMessage):
                     "Add the item here for now.", "form", add_item_form(new_item_id())))
         elif isinstance(item, EndSessionContent):
             ctx.logger.info(f"session ended by {sender}")
+        elif isinstance(item, MetadataContent):  # keys only: find out if card clicks arrive here
+            ctx.logger.info(f"metadata from {sender}: keys={sorted(item.metadata)}")
         else:
             ctx.logger.info(f"ignoring {type(item).__name__} from {sender}")
 

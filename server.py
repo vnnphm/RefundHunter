@@ -9,6 +9,7 @@ import os
 import re
 import sys
 from email.utils import parseaddr
+from urllib.parse import parse_qs, urlparse
 
 import uagents_core.logger
 
@@ -37,6 +38,8 @@ COORDINATOR_ADDRESS = os.getenv("COORDINATOR_ADDRESS", "").strip()
 MAX_BODY = 8000
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 INBOX_DOMAIN = "@upload.pipedream.net"
+PRODUCT_RE = re.compile(r"https?://(?:www\.)?(?:amazon\.com/(?:[^\s\"?#]*/)?(?:dp|gp/product)/[A-Z0-9]{10}"
+                        r"|walmart\.com/ip/[^\s\"?#]+)")
 
 log = logging.getLogger("server")
 logging.basicConfig(level=logging.INFO)
@@ -66,12 +69,25 @@ def user_address(email: Email) -> str:
     return parseaddr(email.sender)[1].lower()
 
 
+def product_link(href: str) -> str:
+    """The product page behind a link, unwrapping tracking redirects (Amazon's gp/r.html?U=…)."""
+    href = html.unescape(href)
+    query = parse_qs(urlparse(href).query)
+    for key in ("U", "u", "url"):
+        if query.get(key):
+            href = query[key][0]
+            break
+    m = PRODUCT_RE.search(href)
+    return m.group(0) if m else ""
+
+
 def plain_text(email: Email) -> str:
-    if email.text.strip():
+    if not email.html.strip():
         body = email.text
-    else:  # HTML-only email: drop tags, keep link targets so the parser can find product URLs
+    else:  # stores put item names, prices and product links in the HTML; the text part is often thin
         body = re.sub(r"(?is)<(script|style).*?</\1>", " ", email.html)
-        body = re.sub(r'(?i)<a\s[^>]*href="([^"]+)"[^>]*>', r" \1 ", body)
+        body = re.sub(r'(?i)<a\s[^>]*href="([^"]+)"[^>]*>', lambda m: f" {product_link(m.group(1))} ", body)
+        body = re.sub(r"(?i)<(br|/p|/div|/tr|/li|/h\d)\b[^>]*>", "\n", body)
         body = html.unescape(re.sub(r"<[^>]+>", " ", body))
     return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n\n", body)).strip()[:MAX_BODY]
 
