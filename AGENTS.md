@@ -326,13 +326,14 @@ Owner: Person A. Users set up a Gmail filter once that auto-forwards order email
 **Pipedream** (only the code step below lives outside the repo)
 1. New workflow, trigger **Email** ("New Email Received"; instant, not polled). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
 2. Workflow **Settings → Environment Variables**: `WEBHOOK_SECRET` (same as `.env` and Vercel) and `REFUND_SERVER_URL` (Vercel URL, no trailing slash).
-3. Step **Node → Run Node code**. The sender's place in the trigger event varies, so look in each:
+3. Step **Node → Run Node code**. The event is `{headers, body: {text, html, …}}`; header values can be lists:
    ```js
    export default defineComponent({
      async run({ steps }) {
        const e = steps.trigger.event;
-       const addr = v => typeof v === "string" ? v
+       const addr = v => typeof v === "string" ? v : Array.isArray(v) ? v.map(addr).join(", ")
          : (v?.value || []).map(a => a.address).filter(Boolean).join(", ") || v?.text || v?.address || "";
+       const one = v => (Array.isArray(v) ? v[0] : v) ?? "";
        const hdr = n => Object.entries(e.headers || {}).find(([k]) => k.toLowerCase() === n)?.[1];
        const res = await fetch(`${process.env.REFUND_SERVER_URL}/email`, {
          method: "POST",
@@ -342,8 +343,8 @@ Owner: Person A. Users set up a Gmail filter once that auto-forwards order email
            from: [e.from, hdr("from"), e.mail_from, e.envelope?.from].map(addr).find(Boolean) || "",
            forwarded_for: addr(hdr("x-forwarded-for")),
            to: [e.to, hdr("to")].map(addr).find(Boolean) || "",
-           subject: e.subject || "", date: String(e.date || ""),
-           text: e.text || "", html: e.html || "",
+           subject: String(e.subject || one(hdr("subject"))), date: String(e.date || one(hdr("date"))),
+           text: e.body?.text || e.text || "", html: e.body?.html || e.html || "",  // body sits under event.body
          }),
        });
        const body = await res.text();
