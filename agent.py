@@ -348,12 +348,12 @@ def mock_parse(r: Receipt) -> ParsedReceipt:
 
 async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
     user = parsed.user_id
-    if not parsed.ok or not parsed.items:
-        ctx.logger.info(f"receipt {parsed.message_id} unreadable: {parsed.error}")
+    items = [{"name": it.name, "price_paid": it.price_paid, "product_url": it.product_url}
+             for it in parsed.items if it.price_paid > 0] if parsed.ok else []
+    if not items:
+        ctx.logger.info(f"receipt {parsed.message_id} unreadable: {parsed.error or 'no priced items'}")
         await ctx.send(user, reply("I got a receipt but couldn't read the items on it. You can add them by hand."))
         return
-    items = [{"name": it.name, "price_paid": it.price_paid, "product_url": it.product_url}
-             for it in parsed.items if it.price_paid > 0]
     if not store.save_receipt(parsed.message_id, user, parsed.store, parsed.purchase_date,
                               parsed.order_number, items):
         ctx.logger.info(f"receipt {parsed.message_id} already seen")
@@ -507,18 +507,25 @@ async def on_message(ctx: Context, sender: str, msg: ChatMessage):
             ctx.logger.info(f"session started by {sender}")
             await ctx.send(sender, accepts_attachments())
         elif isinstance(item, TextContent):
-            ctx.logger.info(f"text from {sender}: {item.text[:120]}")
+            ctx.logger.info(f"text from {sender}: {EMAIL_RE.sub('<email>', item.text[:120])}")
             if not has_photo:  # a caption on a photo gets one reply, below
                 await handle_text(ctx, sender, item.text)
         elif isinstance(item, ResourceContent):
             # Never log the URL: it can be a signed link.
-            if image_url(item):
-                ctx.logger.info(f"receipt photo from {sender}")
-                await ctx.send(sender, card(
-                    "Got your receipt photo. Reading receipts automatically is coming soon; "
-                    "for now, add the item here.", "form", add_item_form(new_item_id())))
-            else:
+            url = image_url(item)
+            if not url:
                 await ctx.send(sender, reply("Couldn't read that attachment, please re-upload it."))
+            elif PARSER_AGENT_ADDRESS:
+                message_id = "photo_" + uuid4().hex[:12]
+                ctx.logger.info(f"receipt photo {message_id} from {sender} -> parser")
+                await ctx.send(sender, reply("Reading your receipt…"))
+                await ctx.send(PARSER_AGENT_ADDRESS, Receipt(message_id=message_id, user_id=sender,
+                                                             image_url=url))
+            else:  # the test parse reads email text, not photos
+                ctx.logger.info(f"receipt photo from {sender}, no PARSER_AGENT_ADDRESS")
+                await ctx.send(sender, card(
+                    "Got your receipt photo, but the receipt reader isn't connected yet. "
+                    "Add the item here for now.", "form", add_item_form(new_item_id())))
         elif isinstance(item, EndSessionContent):
             ctx.logger.info(f"session ended by {sender}")
         else:

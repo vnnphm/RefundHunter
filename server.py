@@ -20,6 +20,7 @@ from dotenv import load_dotenv  # noqa: E402
 from fastapi import FastAPI, Header, HTTPException  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 from uagents_core.identity import Identity  # noqa: E402
+from uagents_core.types import DeliveryStatus  # noqa: E402
 from uagents_core.utils.messages import send_message_to_agent  # noqa: E402
 
 from models import Receipt  # noqa: E402
@@ -78,5 +79,8 @@ def receive_email(email: Email, x_webhook_secret: str = Header(default="")):
                       subject=email.subject[:300], date=email.date, body=plain_text(email))
     # Never log bodies or full addresses: message id and domain only.
     log.info(f"email {email.message_id[:40]} from @{from_addr.split('@')[-1]} -> coordinator")
-    send_message_to_agent(COORDINATOR_ADDRESS, receipt, identity)
+    statuses = send_message_to_agent(COORDINATOR_ADDRESS, receipt, identity)
+    if statuses and all(s.status == DeliveryStatus.FAILED for s in statuses):
+        log.warning(f"email {email.message_id[:40]} not delivered: {statuses[0].detail}")
+        raise HTTPException(status_code=502, detail="couldn't reach the coordinator")  # Pipedream retries
     return {"ok": True}
