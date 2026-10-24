@@ -7,7 +7,7 @@ The rules for anyone (human or coding agent) working in this repo. Verified agai
 Fetch.ai uAgents that find money users are owed on past purchases. Users only talk to it inside an ASI:One chat. Fetch.ai track, Cal Hacks 13.0 (Oct 23–25, 2026).
 
 **Phase 1 (must ship):** user adds an item in ASI:One → we fetch its live price with Bright Data → chat shows "Dropped $X" or "No change".
-**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (a Gmail filter auto-forwards them to a Pipedream inbox → FastAPI `server.py`). See Email receipts.
+**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (the user taps **Connect Gmail** and FastAPI `server.py` reads their recent orders once). See Email receipts.
 **Phase 3 (if time):** refund policy check, claim draft, Payment Protocol.
 
 Build in phase order. Don't start a phase until the one before works in ASI:One.
@@ -24,13 +24,13 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
 
-Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: email webhook + Gmail connect), `gmail.py` (Google OAuth + Gmail API), Pipedream, Bright Data.
+Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: Gmail connect, plus an optional forwarding webhook), `gmail.py` (Google OAuth + Gmail API), Bright Data.
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
 **Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow. An Amazon or Walmart item without a link → `FindProduct` → price agent searches → `FindResult` → carousel → user picks one → Phase 1 flow.
 
-**Flow (Phase 2, email):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
+**Flow (Phase 2, optional forwarding, not used in the demo):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
 
 **Flow (Phase 2, Gmail connect):** menu → **Connect Gmail** → signed link → Google sign-in → `server.py` reads up to 10 recent order emails once, revokes the token → `Receipt(user_id=<from the link>)` each → coordinator → parser agent → same as above.
 
@@ -38,9 +38,9 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: email webho
 
 | | Person A: ASI:One side | Person B: data side |
 | --- | --- | --- |
-| Owns | `agent.py`, `store.py`, cards, `price_agent.py`, `server.py`, Pipedream, README, demo video | `parser_agent.py` (photos and email text) |
+| Owns | `agent.py`, `store.py`, cards, `price_agent.py`, `server.py`, `gmail.py`, README, demo video | `parser_agent.py` (photos and email text) |
 | Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path A) → price agent answers `TrackItem` with `PriceResult` |
-| Phase 2 | Email path (link email, `server.py`, Pipedream) + `ParsedReceipt` handling and review card in `agent.py` | Parser agent: `asi1` reads photos and email text, replies `ParsedReceipt` to its sender |
+| Phase 2 | Email path (Connect Gmail: `server.py`, `gmail.py`) + `ParsedReceipt` handling and review card in `agent.py` | Parser agent: `asi1` reads photos and email text, replies `ParsedReceipt` to its sender |
 | Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
 
 `models.py` is shared: write it together first and change it only together. Work on separate branches and merge often.
@@ -129,7 +129,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`, and for Gmail connect: `PUBLIC_URL`, `OAUTH_STATE_SECRET` (both: coordinator and server), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (server). No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, and for Gmail connect: `PUBLIC_URL`, `OAUTH_STATE_SECRET` (both: coordinator and server), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (server). Optional forwarding only: `WEBHOOK_SECRET`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
 - **Ports:** coordinator 8001, price agent 8002, parser agent 8003, email webhook (`server.py`) 8000.
 
@@ -344,12 +344,27 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 ## Email receipts (Phase 2)
 
-Owner: Person A. Users set up a Gmail filter once that auto-forwards order emails to one shared inbox (or forward by hand); the coordinator matches the user's address to a linked ASI:One user. Or they tap **Connect Gmail** (below), which reads recent orders once with no forwarding setup.
+Owner: Person A. Users tap **Connect Gmail**, sign in with Google, and their recent order emails become review cards. No forwarding, no filters. The Pipedream forwarding path further down is built and tested but **not used**: it's optional, and nothing needs to run for it.
 
 **Gmail connect (OAuth).** Import on connect, keep nothing. Menu → **Connect Gmail** → the coordinator replies with `{PUBLIC_URL}/oauth/start?state=…` (cards can't open links, so it's in the text). The `state` is the user's ASI:One address + time, HMAC-signed with `OAUTH_STATE_SECRET`, valid 15 minutes (`gmail.sign_state`/`check_state`). `/oauth/start` → Google consent (`gmail.readonly`, `access_type=online`: no refresh token) → `/oauth/callback` swaps the code for a token, reads the Gmail address and up to 10 messages matching `gmail.QUERY` (last 30 days, purchases/order/receipt, no shipping updates, no Amazon since its emails don't list items), revokes the token, and sends each as `Receipt(message_id="gm_"+id, user_id=<from state>, sender=<gmail>)`. The coordinator trusts `user_id` only from `SERVER_ADDRESS` and links that Gmail address, so later forwards work too.
 - Google Cloud Console: enable the **Gmail API**; Google Auth Platform → Branding (app name, support email), Audience **External, left in Testing** with test users added (max 100; they see "Google hasn't verified this app" → Advanced → Continue), Data access: `…/auth/gmail.readonly`; Clients → **Web application** with redirect URIs `https://<server URL>/oauth/callback` and `http://localhost:8000/oauth/callback`.
 - Only test users can sign in, so add judges' Gmail addresses before they try it.
 - Never log the token, the code, bodies or full addresses (count and domain only).
+
+**`server.py`** (`uv run uvicorn server:app --port 8000`, or deploy to Vercel: zero-config FastAPI). It turns each email into text (the HTML part when there is one, since stores put items there; image alt text kept, as stores cut long names short; only product links kept, unwrapped from tracking redirects; 8,000 chars max) and sends it as a `Receipt` to `COORDINATOR_ADDRESS` with `send_message_to_agent` (`uagents_core.utils.messages`), signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. On Vercel, set `SERVER_SEED`, `COORDINATOR_ADDRESS`, `PUBLIC_URL`, `OAUTH_STATE_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and turn off Vercel Authentication (Deployment Protection) so Google's redirect can reach it.
+
+**Coordinator.** A `Receipt` from `SERVER_ADDRESS` with `user_id` set (Gmail connect) is used as is, and its address gets linked; one without (forwarding) is matched by linked address, and an unlinked sender is dropped (logged by domain only). Then → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. A `ParsedReceipt` with no priced items is dropped quietly for emails (a broad search lets some non-receipts through), but photos get "couldn't read the items". Otherwise → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
+
+**Answered in testing (2026-10-24)**
+- Agentverse delivers `server.py`'s messages even though its identity isn't registered as an agent.
+- ASI:One shows cards the agent sends first, but answers `429 rate limited` to a burst (see `say()`), so a Gmail import shows one card and keeps the rest pending.
+
+**Rules**
+- Keep only parsed fields. Never log email bodies or full addresses (message id and domain only).
+
+### Optional: forwarding through Pipedream (not used)
+
+Kept for later; skip it for setup and the demo. With `WEBHOOK_SECRET` unset (as in our Vercel), `/email` refuses every request (401), so leaving it in is safe. Why we dropped it: each user had to confirm a forwarding address and make a Gmail filter, and Amazon's emails no longer list items anyway.
 
 **Linking** (for forwarding). Type "link my email you@x.com" (Gmail connect links automatically) → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
 
@@ -393,16 +408,8 @@ Owner: Person A. Users set up a Gmail filter once that auto-forwards order email
 
 Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `422` no sender found, `502` coordinator unreachable, `{"ok":true}` but no card → address not linked or a repeated `message_id`.
 
-**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the user's address from `forwarded_for`, else `to` on an auto-forward, else `from`, turns the HTML part into text when there is one (stores put items there; the text part is often thin), keeping only product links (Amazon `/dp/`, Walmart `/ip/`, unwrapped from tracking redirects), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Vercel (zero-config FastAPI) for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
+**`server.py` `/email`** (forwarding only): checks the `X-Webhook-Secret` header, takes the user's address from `forwarded_for`, else `to` on an auto-forward, else `from`, and sends `Receipt(user_id="", sender=<email>)` the same way as above. `cloudflared tunnel --url http://localhost:8000` works for testing it locally.
 
-**Coordinator.** Unlinked sender → dropped (logged by domain only). Linked → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. A `ParsedReceipt` with no priced items is dropped quietly for emails (a broad filter lets some non-receipts through), but photos get "couldn't read the items". Otherwise → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
-
-**Open questions**
-- Does Agentverse deliver `server.py`'s messages? Its identity isn't registered as an agent. If not: register it (`register_with_agentverse`), or move the webhook onto a uAgent with `on_rest_post`.
-- Does ASI:One show the review card when the agent messages first? If not, the demo says "any new receipts?".
-
-**Rules**
-- Keep only parsed fields. Never log email bodies or full addresses (message id and domain only).
 
 ## Submission checklist
 
