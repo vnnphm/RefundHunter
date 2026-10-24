@@ -7,7 +7,7 @@ The rules for anyone (human or coding agent) working in this repo. Verified agai
 Fetch.ai uAgents that find money users are owed on past purchases. Users only talk to it inside an ASI:One chat. Fetch.ai track, Cal Hacks 13.0 (Oct 23–25, 2026).
 
 **Phase 1 (must ship):** user adds an item in ASI:One → we fetch its live price with Bright Data → chat shows "Dropped $X" or "No change".
-**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (Gmail → Pipedream → FastAPI).
+**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (user forwards to a Pipedream inbox → FastAPI `server.py`). See Email receipts.
 **Phase 3 (if time):** refund policy check, claim draft, Payment Protocol.
 
 Build in phase order. Don't start a phase until the one before works in ASI:One.
@@ -30,13 +30,15 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pi
 
 **Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow.
 
+**Flow (Phase 2, email):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
+
 ## Who owns what (2 people)
 
 | | Person A: ASI:One side | Person B: data side |
 | --- | --- | --- |
-| Owns | `agent.py`, `store.py`, cards, README, demo video | `price_agent.py`, `parser_agent.py`, `server.py`, Pipedream |
+| Owns | `agent.py`, `store.py`, cards, `price_agent.py`, `server.py`, Pipedream, README, demo video | `parser_agent.py` (photos and email text) |
 | Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path A) → price agent answers `TrackItem` with `PriceResult` |
-| Phase 2 | Accept photos in chat → `Receipt` to parser → review card of parsed items → save confirmed items | Parser agent (vision model reads photos, LLM reads email text) → then FastAPI on Railway + Pipedream |
+| Phase 2 | Email path (link email, `server.py`, Pipedream) + `ParsedReceipt` handling and review card in `agent.py` | Parser agent: `asi1` reads photos and email text, replies `ParsedReceipt` to its sender |
 | Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
 
 `models.py` is shared: write it together first and change it only together. Work on separate branches and merge often.
@@ -106,9 +108,9 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
-- **Ports:** coordinator 8001, price agent 8002, parser agent 8003.
+- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, email webhook (`server.py`) 8000.
 
 ## Run and connect
 
@@ -314,6 +316,28 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 **Rules**
 - Only use the photo to read the receipt; don't store the image or its bytes. Keep only the parsed fields.
 - Never log image URLs (they can be signed links) or full receipt text.
+
+## Email receipts (Phase 2)
+
+Owner: Person A. Users forward order emails to one shared inbox; the coordinator matches the sender to a linked ASI:One user. No Gmail OAuth.
+
+**Linking.** Menu → **Link my email** (or "link my email you@x.com") → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
+
+**Pipedream** (no code in repo)
+1. New workflow, trigger **Email** ("new email received"). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
+2. Step: HTTP POST to `<server URL>/email`, header `X-Webhook-Secret: <WEBHOOK_SECRET>`, JSON `{"message_id", "from", "subject", "date", "text", "html"}` from the trigger event.
+3. A forwarded email's `from` is the person who forwarded it, which is what linking matches.
+
+**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the address out of `from`, turns HTML-only mail into text (keeping link targets), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Railway for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
+
+**Coordinator.** Unlinked sender → dropped (logged by domain only). Linked → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. `ParsedReceipt` → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
+
+**Open questions**
+- Does Agentverse deliver `server.py`'s messages? Its identity isn't registered as an agent. If not: register it (`register_with_agentverse`), or move the webhook onto a uAgent with `on_rest_post`.
+- Does ASI:One show the review card when the agent messages first? If not, the demo says "any new receipts?".
+
+**Rules**
+- Keep only parsed fields. Never log email bodies or full addresses (message id and domain only).
 
 ## Submission checklist
 
