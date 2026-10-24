@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import re
@@ -83,10 +84,21 @@ def domain_for(url: str, shop: str) -> str:
     return re.sub(r"^(www|m|smile)\.", "", host)
 
 
+def unwrap(results: str) -> str:
+    """Bing wraps every result link in bing.com/ck/a?…&u=a1<base64 link>: put the real links first."""
+    real = []
+    for b64 in re.findall(r"[?&]u=a1([\w-]+)", results):
+        try:
+            real.append(base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)).decode())
+        except ValueError:  # not a link we can read
+            pass
+    return "\n".join(real) + "\n" + results
+
+
 def policy_link(results: str, domain: str) -> str | None:
     """The store's own policy page among search results: on its domain, 'return' in the link if possible."""
     links = []
-    for u in re.findall(r"https?://[^\s\"'<>)\]]+", results):
+    for u in re.findall(r"https?://[^\s\"'<>)\]]+", unwrap(results)):
         host = urlparse(u).netloc.lower().split(":")[0]
         if host == domain or host.endswith("." + domain):
             links.append(u.rstrip(".,"))

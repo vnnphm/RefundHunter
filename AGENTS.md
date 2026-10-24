@@ -290,10 +290,13 @@ Owner: Person B, in `policy_agent.py`. Answers a `TrackItem` with a `PolicyResul
 
 **Coordinator side:** `track_new_item` sends the same `TrackItem` to `POLICY_AGENT_ADDRESS` next to the price check. `TrackItem` has no purchase date, so the policy agent returns the window and the coordinator does the date math: return by = `items.purchase_date` (from the receipt) else `added_at` + `return_days`. `PolicyResult` is saved on the item (`store.save_policy`); the detail card gets "Return by" (or "Not returnable"), "Price adjustment" and "Policy" rows. If the price card was already shown, it's re-sent with those rows; if not, the price card includes them. A failed policy check is logged and the card just leaves the rows out.
 
-**Tested live (2026-10-24)** with the real Bright Data key; asi1 step not yet (no `ASI_ONE_API_KEY` in that run):
+**Tested live (2026-10-24)** with the real Bright Data key, then end to end with `asi1`:
 - Policy pages found: Amazon `…display.html?nodeId=GKM69DUUYKQWKWX7` (30 days), Walmart `…/walmart-standard-return-policy/…` (90 days, most electronics 30), Target `target.com/returns` (90 days, Target brand 365).
 - Walmart's page came back **in Spanish**; the prompt tells `asi1` to read any language and answer in English.
 - Google once returned no links for Walmart; hence the Bing retry.
+- Bing wraps result links in `bing.com/ck/a?…&u=a1<base64>` redirects; `policy_link` decodes them, or the Bing retry finds nothing.
+- `asi1` results: Amazon `B09XS7JWHH` → returnable, 30 days. Walmart onn 32" Roku TV → returnable, 30 days (electronics). Target (a Threshold towels page) → returnable, 90 days, summary mentions Target brand 365. `price_adjust_days` came back `null` for all three: none of the policy pages mention price adjustments.
+- walmart.com's policy-page scrape failed once (`scrape_as_markdown` error) and worked on the next try; that check returns `ok=False` and the card leaves the policy rows out.
 
 **Rules**
 - MCP session URL holds the token: errors are reported by type only, never the exception text or traceback. `bd.py` sets the `httpx`, `httpx2` and `mcp` loggers to WARNING, because `httpx2` logs every request URL (token included) at INFO.
