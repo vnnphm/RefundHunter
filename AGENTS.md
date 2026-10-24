@@ -106,7 +106,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and `OPENAI_API_KEY` only if `asi1` can't read images (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
 - **Ports:** coordinator 8001, price agent 8002, parser agent 8003.
 
@@ -265,7 +265,9 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 ## Receipt photos (Phase 2)
 
-Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5).
+Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5) and the ASI:One API docs on image input.
+
+**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Steps 3–5 are next.
 
 **1. Tell ASI:One we accept attachments.** When a `StartSessionContent` arrives, reply with:
 ```python
@@ -288,18 +290,29 @@ def image_url(item) -> str | None:
 ```
 Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="photo_"+uuid, user_id=sender, image_url=url)` to the parser agent.
 
-**3. Read the receipt** (parser agent). Send the image URL to a vision model with temperature 0 and ask for strict JSON matching `ParsedReceipt` (store, purchase_date, order_number, items with name and price_paid).
-- **Test first whether `asi1` accepts images.** Send one chat completion with an `image_url` content part. Fetch's docs don't say either way.
-- If it doesn't, use OpenAI `gpt-4.1-mini` (what Fetch's example uses) with `OPENAI_API_KEY`. Pick one on purpose and write it in the README; no silent fallback.
+**3. Read the receipt** (parser agent). `asi1` reads images itself, so there's no second model or key. All ASI:One models take image input, on both `/v1/chat/completions` and `/v1/responses`.
+- **Download the photo, send the bytes.** Images go in as a `data:` URI, not a link: `data:<mime>;base64,<bytes>`. The parser `GET`s `Receipt.image_url` (httpx, follow redirects, ~30 s timeout), checks `content-type` is `image/*` and the size is ≤ 20 MB, then base64-encodes it. Up to 10 images per request; we send one.
+- **Ask for structured output.** `/v1/chat/completions` with `model="asi1"`, `temperature=0` and `response_format` set to a JSON schema of `ParsedReceipt`'s fields (store, purchase_date, order_number, items with name and price_paid). On `/v1/responses` the same schema goes in `text.format`, and the image part is `{"type": "input_image", "image_url": "data:…"}`.
+  ```python
+  {"role": "user", "content": [
+      {"type": "text", "text": PROMPT},
+      {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}
+  ```
+- **Errors are explicit.** An unreadable image is a `400` with `code: "unsupported_content_part"` (no URL, bad base64, over 20 MB, too many images, a host ASI:One doesn't fetch from). A `200` means the image was used.
 - Same prompt and output for email text (`Receipt.body`), so photos and emails share one parser.
-- Unreadable photo, or no items found → `ParsedReceipt(ok=False, error=...)`.
+- Download failed, unreadable photo, or no items found → `ParsedReceipt(ok=False, error=...)`.
+
+**Open question: can the parser download ASI:One's attachment URL?** Fetch's example only forwarded the URL to OpenAI; it never downloaded it, and ASI:One's storage may need auth or expire. Find out with the first real photo:
+- The parser logs the download's status code, `content-type` and size (never the URL).
+- `200` + `image/*` → done, use the steps above.
+- `401`/`403`/`404`, or HTML instead of an image → try sending the URL itself as `image_url` (no download). If ASI:One answers `400 unsupported_content_part` for that host too, we need another way to get the bytes; ask in the Fetch.ai hackathon channel before building more.
 
 **4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
 
 **5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`, show a `form` card asking for the link. Later, if there's time: search for it (Bright Data MCP `search_engine`, or Amazon's Products Search scraper `gd_lwdb4vjm1ehb499uxs`) and let the user pick from a `carousel`.
 
 **Rules**
-- Only use the photo URL to read the receipt; don't store the image. Keep only the parsed fields.
+- Only use the photo to read the receipt; don't store the image or its bytes. Keep only the parsed fields.
 - Never log image URLs (they can be signed links) or full receipt text.
 
 ## Submission checklist
@@ -324,6 +337,7 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 - [Scraper API limits](https://docs.brightdata.com/products/scrapers/limits.md): one input per sync request, 25 × 429 in 5 min blocks the IP
 - [Free tier](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier.md): 5,000 shared credits/month
 - [Bright Data MCP overview](https://docs.brightdata.com/products/mcp-server/overview.md), [remote quickstart](https://docs.brightdata.com/products/mcp-server/remote/quickstart), [tools](https://docs.brightdata.com/products/mcp-server/tools), [advanced config](https://docs.brightdata.com/products/mcp-server/remote/advanced)
-- [Image analysis agent example, docs v1.0.5](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent): `{"attachments": "true"}` on session start, image URL from `ResourceContent`, OpenAI `gpt-4.1-mini`
+- [Image analysis agent example, docs v1.0.5](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent): `{"attachments": "true"}` on session start, image URL from `ResourceContent` (it uses OpenAI; we use `asi1` instead)
+- ASI:One API docs, image input (checked 2026-10-24): every model takes images as a `data:` URI, ≤ 20 MB, ≤ 10 per request, same rules on `/v1/chat/completions` and `/v1/responses`; unreadable image → `400 unsupported_content_part`
 - [Fetch.ai CalHacks 13.0 hackpack](https://innovationlab.fetch.ai/events/hackathons/calhacks-13-0/hackpack)
 - PyPI release data; sandbox tests of uagents 0.26.1 on Python 3.13 vs 3.14 and the mcp 2.3.0 client API
