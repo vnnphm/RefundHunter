@@ -5,3 +5,5 @@ __pycache__/
 *.db
 CONTINUITY.md
 *.log
+# uagents ctx.storage (pending product searches)
+agent1*_data.json

@@ -43,3 +43,25 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     order_number: str = ""
     items: list[ReceiptItem] = []
     error: Optional[str] = None
+
+
+class FindProduct(Model):     # coordinator -> price agent: a receipt item with no link
+    item_id: str
+    user_id: str
+    query: str                # item name from the receipt
+    store: str = "amazon"
+
+
+class ProductMatch(Model):
+    name: str
+    product_url: str
+    price: Optional[float] = None
+    image_url: str = ""
+
+
+class FindResult(Model):      # price agent -> coordinator
+    item_id: str
+    user_id: str
+    ok: bool
+    matches: list[ProductMatch] = []
+    error: Optional[str] = None
