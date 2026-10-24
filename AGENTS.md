@@ -28,6 +28,17 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pi
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
+## Who owns what (2 people)
+
+| | Person A: ASI:One side | Person B: data side |
+| --- | --- | --- |
+| Owns | `agent.py`, `store.py`, cards, README, demo video | `price_agent.py`, `parser_agent.py`, `server.py`, Pipedream |
+| Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path 1) → price agent answers `TrackItem` with `PriceResult` |
+| Phase 2 | Show email-sourced items in the carousel | FastAPI on Railway + Pipedream → parser agent |
+| Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
+
+`models.py` is shared: write it together first and change it only together. Work on separate branches and merge often.
+
 ## Message contract (`models.py`)
 
 Agree on this before splitting work. Change it only together.
@@ -72,11 +83,12 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | uagents | 0.26.1 | 2026-10-08 |
 | uagents-core | 0.4.12 | 2026-10-13 |
 | python-dotenv | 1.2.4 | 2026-10-01 |
-| mcp (Phase 1, price agent) | 2.3.0 | 2026-10-02 |
-| openai (ASI:One LLM) | 3.37.0 | latest at time of writing |
-| fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest at time of writing |
+| httpx (Scraper API calls) | 0.28.1 | latest on 2026-10-23 |
+| mcp (MCP fallback) | 2.3.0 | 2026-10-02 |
+| openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
+| fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`. `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
 - **Ports:** coordinator 8001, price agent 8002, parser agent 8003.
 
@@ -107,21 +119,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 - Test payloads in the Card Playground first.
 - Replies arrive as JSON (direct @mention) or prose (planner): try `json.loads`, then parse text. Put `item_id` in every `selection`.
 
-**Bright Data MCP** (price agent)
-- URL: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`
-- mcp 2.x: `streamable_http_client(url)` yields **two** streams, `(read, write)`.
-  ```python
-  from mcp import ClientSession
-  from mcp.client.streamable_http import streamable_http_client
-
-  async with streamable_http_client(url) as (read, write):
-      async with ClientSession(read, write) as s:
-          await s.initialize()
-          res = await s.call_tool("web_data_amazon_product", {"url": url_to_check},
-                                  read_timeout_seconds=180)
-  ```
-- Tools: `web_data_amazon_product`, `web_data_walmart_product`; fallback `scrape_as_markdown`. Run `list_tools()` first to see what your token has.
-- `groups=` / `pro=1` URL params are unofficial (Smithery listing). Verify before relying on them.
+**Bright Data**: see "Price scraping" below.
 
 **ASI:One LLM**
 - `OpenAI(api_key=os.getenv("ASI_ONE_API_KEY"), base_url="https://api.asi1.ai/v1")`, `model="asi1"`. No silent fallback to another provider.
@@ -133,6 +131,117 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 - Secrets only in `.env`; document every key in `.env.example`. Never log seeds, tokens, or full emails.
 - Keep only extracted receipt fields (item, price, store, date, order number). Discard the rest.
 - Small flat files. No new folders until there's a reason.
+
+## Price scraping (Bright Data)
+
+Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Based on Bright Data's own agent guidance in [llms.txt](https://docs.brightdata.com/llms.txt): use a ready-made Scraper API when the site has one; use the MCP for page fetching; never fetch through a raw proxy and parse HTML yourself.
+
+**Which path for which store**
+
+| Store | Path | Why |
+| --- | --- | --- |
+| Amazon | **A: Scraper API** (REST), dataset `gd_l7q7dkf244hwjntr0` | Ready-made scraper; returns `final_price` directly |
+| Anything else (Walmart, Target, …) | **B: MCP** `search_scrapers` → if a scraper exists, run it via Path A with its `dataset_id` | Bright Data says don't build a scraper for a site that has one |
+| No scraper found | **C: MCP** `scrape_as_markdown` → ASI:One reads the price | Works on any page |
+
+Build Path A first; it covers the demo. Add C as the general fallback, then B if there's time.
+
+**Auth and budget**
+- One API key. REST: `Authorization: Bearer <BRIGHTDATA_API_TOKEN>`. MCP: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`.
+- Free tier: 5,000 credits/month, **one pool shared by both of us and every product**. Scraper API = 1 credit per delivered record; MCP / Web Unlocker = 1 credit per request. No rollover.
+- **25 HTTP 429s within 5 minutes gets our IP blocked** from all Bright Data APIs until support clears it. Never retry in a tight loop; honor `retry-after`.
+
+**Path A: Scraper API, synchronous** (`uv add httpx==0.28.1`)
+- `POST https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_l7q7dkf244hwjntr0&format=json`, body `{"input": [{"url": product_url}]}`. One input per request.
+- `200` → JSON array of records. Use `final_price` (fallback `initial_price`), `currency`, `availability`, `title`. Empty array = bad input URL.
+- Waits up to 1 minute. If longer: `202` with `snapshot_id` and a `retry-after` header. Poll `GET /datasets/v3/progress/{snapshot_id}` every `retry-after` seconds, then `GET /datasets/v3/snapshot/{snapshot_id}?format=json`.
+- `400` bad input, `401` bad key, `404` bad dataset_id, `429` rate limited → `PriceResult(ok=False)`.
+
+```python
+import asyncio, os
+import httpx
+
+BD_KEY = os.environ["BRIGHTDATA_API_TOKEN"]
+BD_API = "https://api.brightdata.com/datasets/v3"
+AMAZON_PRODUCTS = "gd_l7q7dkf244hwjntr0"  # Amazon products, collect by URL
+
+async def amazon_price(url: str) -> dict:
+    headers = {"Authorization": f"Bearer {BD_KEY}"}
+    async with httpx.AsyncClient(timeout=90, headers=headers) as c:
+        r = await c.post(f"{BD_API}/scrape",
+                         params={"dataset_id": AMAZON_PRODUCTS, "format": "json"},
+                         json={"input": [{"url": url}]})
+        if r.status_code == 202:  # still running: poll the snapshot
+            sid = r.json()["snapshot_id"]
+            for _ in range(12):
+                await asyncio.sleep(int(r.headers.get("retry-after", 10)))
+                status = (await c.get(f"{BD_API}/progress/{sid}")).json().get("status")
+                if status == "failed":
+                    raise RuntimeError("Bright Data job failed")
+                if status == "ready":
+                    r = await c.get(f"{BD_API}/snapshot/{sid}", params={"format": "json"})
+                    break
+            else:
+                raise TimeoutError("Bright Data snapshot not ready")
+        r.raise_for_status()
+        records = r.json()
+    if not records:
+        raise ValueError("no record for this URL")
+    rec = records[0]
+    return {"price": rec.get("final_price") or rec.get("initial_price"),
+            "currency": rec.get("currency"), "title": rec.get("title"),
+            "availability": rec.get("availability")}
+```
+
+**Path B/C: MCP** (`uv add mcp==2.3.0 openai==3.37.0`)
+- All MCP tools are on by default; load fewer with `&groups=` (`scrapers`, `browser`, `advanced_scraping`, `geo`) or `&tools=a,b`.
+- mcp 2.x: `streamable_http_client(url)` yields **two** streams; results have `.content` and `.is_error` (not `isError`). Always pass `read_timeout_seconds`.
+- **Step 0:** list your tools and their inputs before writing calls:
+  ```python
+  res = await s.list_tools()
+  for t in res.tools:
+      print(t.name, t.inputSchema)
+  ```
+- **B:** `search_scrapers` with the store's domain → `dataset_id` → `get_scraper_details` (input fields, price field) → call Path A's REST endpoint with that `dataset_id`. Look the id up once and save it as a constant.
+- **C:** `scrape_as_markdown` → first ~8,000 chars → ASI:One (`asi1`, temperature 0) returns strict JSON `{"title", "price", "currency", "in_stock"}`.
+
+```python
+import json, os
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from openai import AsyncOpenAI
+
+BD_MCP = f"https://mcp.brightdata.com/mcp?token={os.environ['BRIGHTDATA_API_TOKEN']}"
+llm = AsyncOpenAI(api_key=os.environ["ASI_ONE_API_KEY"], base_url="https://api.asi1.ai/v1")
+PROMPT = ('From this product page, return only JSON: {"title": str|null, "price": number|null, '
+          '"currency": "USD", "in_stock": bool|null}. price = current selling price.\n\n')
+
+async def page_markdown(url: str) -> str:
+    async with streamable_http_client(BD_MCP) as (read, write):
+        async with ClientSession(read, write) as s:
+            await s.initialize()
+            res = await s.call_tool("scrape_as_markdown", {"url": url}, read_timeout_seconds=120)
+    if res.is_error:
+        raise RuntimeError("scrape failed")
+    return "\n".join(getattr(c, "text", "") for c in res.content)
+
+async def read_price(markdown: str) -> dict:
+    r = await llm.chat.completions.create(
+        model="asi1", temperature=0,
+        messages=[{"role": "user", "content": PROMPT + markdown[:8000]}])
+    text = (r.choices[0].message.content or "").strip()
+    text = text.removeprefix("`" * 3 + "json").strip("`\n ")  # drop a markdown fence if present
+    return json.loads(text)
+```
+Confirm `{"url": ...}` against Step 0's `inputSchema`.
+
+**Rules**
+- Only the price agent calls Bright Data. The coordinator says "Checking price…" and sends the card when `PriceResult` arrives.
+- Every failure (timeout, 4xx/5xx, empty record, no price) becomes `PriceResult(ok=False, error=...)`. Never let the handler raise.
+- Accept only a positive number as a price.
+- Don't re-scrape a URL within a few minutes; reuse the stored price and `checked_at`. Credits are shared.
+- Skip the MCP `extract` tool: it relies on MCP sampling, which our client doesn't implement. Path C does the same job.
+- Never log the API key or a URL containing `?token=`.
 
 ## Submission checklist
 
@@ -150,7 +259,11 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 - [ASI:One Interactive Cards, docs v1.0.5](https://innovationlab.fetch.ai/resources/docs/interactive-cards/asi-interactive-cards)
 - [ASI:One OpenAI compatibility, docs v1.0.5](https://innovationlab.fetch.ai/resources/docs/asione/build/openai-compatibility)
 - [fetch-skills chat-protocol skill v2.0.3 (2026-05-04)](https://cdn.jsdelivr.net/npm/fetch-skills@2.0.3/skills/chat-protocol/SKILL.md), older than the docs; docs win
-- [Bright Data remote MCP quickstart](https://docs.brightdata.com/products/mcp-server/remote/quickstart)
-- [Bright Data Web MCP on Smithery](https://smithery.ai/skills/sitammeur/brightdata-web-mcp) (unofficial)
+- [Bright Data llms.txt](https://docs.brightdata.com/llms.txt): agent guidance (Scraper API first, MCP for page fetching, Bearer auth)
+- [Scraper API synchronous requests](https://docs.brightdata.com/api-reference/scrapers/synchronous-requests.md): `/datasets/v3/scrape`, 1-minute limit, 202 + `snapshot_id`
+- [Amazon Scraper API](https://docs.brightdata.com/products/scrapers/amazon/introduction.md): dataset `gd_l7q7dkf244hwjntr0`, `final_price` / `initial_price` / `currency` / `availability`
+- [Scraper API limits](https://docs.brightdata.com/products/scrapers/limits.md): one input per sync request, 25 × 429 in 5 min blocks the IP
+- [Free tier](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier.md): 5,000 shared credits/month
+- [Bright Data MCP overview](https://docs.brightdata.com/products/mcp-server/overview.md), [remote quickstart](https://docs.brightdata.com/products/mcp-server/remote/quickstart), [tools](https://docs.brightdata.com/products/mcp-server/tools), [advanced config](https://docs.brightdata.com/products/mcp-server/remote/advanced)
 - [Fetch.ai CalHacks 13.0 hackpack](https://innovationlab.fetch.ai/events/hackathons/calhacks-13-0/hackpack)
 - PyPI release data; sandbox tests of uagents 0.26.1 on Python 3.13 vs 3.14 and the mcp 2.3.0 client API
