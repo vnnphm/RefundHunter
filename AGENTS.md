@@ -159,6 +159,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 - One `MetadataContent` with string values only: `card_protocol_version: "1"`, `requires_card_interaction: "true"`, `card_kind`, and `card_payload` as `json.dumps(...)` with no wrapper. Invalid cards silently show as plain text.
 - Test payloads in the Card Playground first.
 - Replies arrive as JSON (direct @mention) or prose (planner): try `json.loads`, then parse text. Put `item_id` in every `selection`.
+- ASI:One answers `429 rate limited` to messages sent back-to-back and drops them (no retry). Send every user message through `say()` in `agent.py`, which spaces one user's messages 1.5 s apart.
 
 **Bright Data**: see "Price scraping" below.
 
@@ -189,7 +190,7 @@ Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Base
 **Built:** Path A for Amazon and Walmart in `price_agent.py`. `store: "other"` replies `ok=False, error="store not supported yet"` until C is added. Dataset ids come from [scrapers.json](https://docs.brightdata.com/scrapers.json).
 Test one link without starting the agent (costs one credit): `uv run price_agent.py --check <url> [amazon|walmart]`.
 
-**Search (receipt items without a link):** Amazon products search `gd_lwdb4vjm1ehb499uxs`, input `{"keyword", "url": "https://www.amazon.com", "pages_to_search": 1}` with `limit_per_input=3` (honoured: 3 records = 3 credits, ~7 s). Fields: `asin`, `name`, `final_price`, `image`, `sponsored`, `rank_on_page`. Sponsored and priceless results are skipped; URLs become `https://www.amazon.com/dp/<asin>`, and their prices go into the 10-minute cache, so tracking a pick costs nothing. Walmart: products search `gd_m7khey0wb7wviejgj`, input `{"url": "https://www.walmart.com/search?q=<name>"}`, same limit (~50 s; names may come back in Spanish, the receipt keeps its own). Fields: `us_item_id`, `name`, `price`, `is_sponsored_flag`, `product_index`; links become `https://www.walmart.com/ip/<us_item_id>`, which the Walmart product scraper accepts (`final_price` confirmed). Walmart's emails have no product links at all (the item picture is a bare `<img>` with the name as alt text), so search is how Walmart items get one. Other stores get the link form. Test: `uv run price_agent.py --search "<item name>" [amazon|walmart]` (≤3 credits).
+**Search (receipt items without a link):** Amazon products search `gd_lwdb4vjm1ehb499uxs`, input `{"keyword", "url": "https://www.amazon.com", "pages_to_search": 1}` with `limit_per_input=3` (honoured: 3 records = 3 credits, ~7 s). Fields: `asin`, `name`, `final_price`, `image`, `sponsored`, `rank_on_page`. Sponsored and priceless results are skipped; URLs become `https://www.amazon.com/dp/<asin>`, and their prices go into the 10-minute cache, so tracking a pick costs nothing. Walmart: products search `gd_m7khey0wb7wviejgj`, input `{"url": "https://www.walmart.com/search?q=<name>"}`, same limit (50–80 s; names sometimes come back in Spanish, so `english_name` rebuilds them from the English `canonical_url` slug). Fields: `us_item_id`, `name`, `price`, `is_sponsored_flag`, `product_index`; links become `https://www.walmart.com/ip/<us_item_id>`, which the Walmart product scraper accepts (`final_price` confirmed). Walmart's emails have no product links at all (the item picture is a bare `<img>` with the name as alt text), so search is how Walmart items get one. Other stores get the link form. Test: `uv run price_agent.py --search "<item name>" [amazon|walmart]` (≤3 credits).
 
 **Auth and budget**
 - One API key. REST: `Authorization: Bearer <BRIGHTDATA_API_TOKEN>`. MCP: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`.
@@ -281,6 +282,7 @@ async def read_price(markdown: str) -> dict:
 Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 **Rules**
+- uagents runs an agent's handlers **one at a time**: a handler that awaits a 60 s scrape holds up every message behind it. `price_agent.py` starts each job with `background()` (at most `MAX_JOBS` at once) and returns. Searches give up after `SEARCH_LIMIT_S` (75 s) and the user gets the link form; price checks keep the longer limit.
 - Only the price agent calls Bright Data. The coordinator says "Checking price…" and sends the card when `PriceResult` arrives.
 - Every failure (timeout, 4xx/5xx, empty record, no price) becomes `PriceResult(ok=False, error=...)`. Never let the handler raise.
 - Accept only a positive number as a price.
@@ -334,7 +336,7 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 **4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
 
-**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`: on an Amazon or Walmart receipt, the coordinator sends `FindProduct` and shows the top 3 matches from that store in a `carousel` (each tile's button is a filled-in `submit_item`), then a link form for "not listed". The user picks, because one name matches several variants (sizes, kits). Other stores, or no matches, get the link form.
+**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`: on an Amazon or Walmart receipt, the coordinator sends `FindProduct` and shows the top 3 matches from that store in a `carousel` (each tile's button is a filled-in `submit_item`), then a link form for "not listed". The user picks, because one name matches several variants (sizes, kits). Other stores, or no matches, get the link form. The search starts when the review card is shown, not on Approve (Walmart's takes 50–80 s), and the matches wait in `ctx.storage` until the user approves; dismissing forgets them. Only shown cards search, so a Gmail import spends credits on one receipt at a time.
 
 **Rules**
 - Only use the photo to read the receipt; don't store the image or its bytes. Keep only the parsed fields.

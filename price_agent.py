@@ -1,9 +1,10 @@
 import asyncio
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -22,6 +23,8 @@ DATASETS = {
 SEARCH_LIMIT = 3  # records are billed one credit each: ask for only what the carousel shows
 PRICE_FIELDS = ("final_price", "price", "initial_price")
 POLL_LIMIT_S = 180
+SEARCH_LIMIT_S = 75  # a search slower than this gets the link form instead: pasting beats waiting
+MAX_JOBS = 4  # Bright Data jobs at once
 CACHE_TTL_S = 600  # free tier credits are shared: don't re-scrape a URL for 10 min
 
 SEED = os.getenv("PRICE_AGENT_SEED", "")
@@ -51,8 +54,10 @@ async def scrape(url: str, dataset_id: str, client: httpx.AsyncClient | None = N
 
 
 async def scrape_records(inp: dict, dataset_id: str, params: dict | None = None,
-                         client: httpx.AsyncClient | None = None) -> list[dict]:
-    """Run one Bright Data Scraper API job for one input and return all its records."""
+                         client: httpx.AsyncClient | None = None, limit_s: float | None = None) -> list[dict]:
+    """Run one Bright Data Scraper API job for one input and return all its records.
+    limit_s caps the whole job (request + polling); by default the request waits 90 s, then polls 180 s."""
+    give_up = time.monotonic() + limit_s if limit_s else None
     token = os.getenv("BRIGHTDATA_API_TOKEN", "")
     if not token:
         raise ScrapeError("BRIGHTDATA_API_TOKEN is not set")
@@ -62,12 +67,14 @@ async def scrape_records(inp: dict, dataset_id: str, params: dict | None = None,
     try:
         r = await client.post(f"{BD_API}/scrape",
                               params={"dataset_id": dataset_id, "format": "json", **(params or {})},
-                              json={"input": [inp]})
+                              json={"input": [inp]}, timeout=min(90, limit_s) if limit_s else httpx.USE_CLIENT_DEFAULT)
         if r.status_code == 202:  # took over a minute: poll the snapshot
             sid = r.json()["snapshot_id"]
-            deadline = time.monotonic() + POLL_LIMIT_S
+            deadline = give_up or time.monotonic() + POLL_LIMIT_S
             while True:
-                await asyncio.sleep(int(r.headers.get("retry-after", 10)))
+                if time.monotonic() > deadline:
+                    raise ScrapeError("Bright Data took too long")
+                await asyncio.sleep(min(int(r.headers.get("retry-after", 10)), max(1, deadline - time.monotonic())))
                 p = await client.get(f"{BD_API}/progress/{sid}")
                 check(p)
                 status = p.json().get("status")
@@ -80,6 +87,8 @@ async def scrape_records(inp: dict, dataset_id: str, params: dict | None = None,
                     raise ScrapeError("Bright Data took too long")
         check(r)
         records = r.json()
+    except httpx.TimeoutException as e:
+        raise ScrapeError("Bright Data took too long") from e
     except httpx.HTTPError as e:
         raise ScrapeError(f"network error: {type(e).__name__}") from e
     finally:
@@ -130,8 +139,27 @@ async def get_price(req: TrackItem, client: httpx.AsyncClient | None = None) -> 
     return PriceResult(item_id=req.item_id, ok=True, current_price=price, title=title, checked_at=now)
 
 
+# uagents runs an agent's handlers one at a time, so a slow scrape would hold up every request
+# behind it. Handlers start the job in the background and return; MAX_JOBS run at once.
+_jobs: set[asyncio.Task] = set()
+_slots = asyncio.Semaphore(MAX_JOBS)
+
+
+def background(coro):
+    async def run():
+        async with _slots:
+            await coro
+    task = asyncio.get_running_loop().create_task(run())
+    _jobs.add(task)  # keep a reference so the task isn't garbage-collected mid-scrape
+    task.add_done_callback(_jobs.discard)
+
+
 @agent.on_message(model=TrackItem, replies=PriceResult)
 async def on_track(ctx: Context, sender: str, req: TrackItem):
+    background(answer_track(ctx, sender, req))
+
+
+async def answer_track(ctx: Context, sender: str, req: TrackItem):
     start = time.monotonic()
     try:
         result = await get_price(req)
@@ -159,6 +187,18 @@ def _walmart_hit(rec: dict) -> tuple[str, int, bool] | None:
     return f"https://www.walmart.com/ip/{item}", rank, bool(rec.get("is_sponsored_flag"))
 
 
+SPANISH = re.compile(r"[áéíóúñ¿¡]|\b(de|para|con|caja|paquete|unidades|juego)\b", re.IGNORECASE)
+
+
+def english_name(rec: dict) -> str:
+    """Walmart's search sometimes answers in Spanish; the product URL's slug is always English."""
+    name = rec.get("name") or rec.get("title") or ""
+    slug = urlparse(rec.get("canonical_url") or "").path.split("/")
+    if SPANISH.search(name) and len(slug) > 3 and slug[1] == "ip":
+        return slug[2].replace("-", " ")
+    return name
+
+
 # store -> (dataset, input for a name, record -> (product url, rank, sponsored))
 SEARCHES = {
     "amazon": ("gd_lwdb4vjm1ehb499uxs",  # Amazon products search
@@ -173,7 +213,8 @@ async def search_records(query: str, store: str, client: httpx.AsyncClient | Non
         raise ScrapeError("search only works for Amazon and Walmart")
     dataset_id, make_input, _ = SEARCHES[store]
     query = query.strip().rstrip(".…").strip()[:80]  # a cut-off name ("Corrugated Sh...") searches badly
-    return await scrape_records(make_input(query), dataset_id, {"limit_per_input": SEARCH_LIMIT}, client)
+    return await scrape_records(make_input(query), dataset_id, {"limit_per_input": SEARCH_LIMIT}, client,
+                                limit_s=SEARCH_LIMIT_S)
 
 
 async def find_products(query: str, store: str = "amazon",
@@ -186,7 +227,7 @@ async def find_products(query: str, store: str = "amazon",
             hits.append((hit[1], hit[0], price, rec))
     matches = []
     for _, url, price, rec in sorted(hits, key=lambda h: h[0])[:SEARCH_LIMIT]:
-        name = rec.get("name") or rec.get("title") or ""
+        name = english_name(rec)
         _cache[url] = (time.time(), price, name)
         matches.append(ProductMatch(name=name, product_url=url, price=price, image_url=rec.get("image") or ""))
     return matches
@@ -194,6 +235,11 @@ async def find_products(query: str, store: str = "amazon",
 
 @agent.on_message(model=FindProduct, replies=FindResult)
 async def on_find(ctx: Context, sender: str, req: FindProduct):
+    ctx.logger.info(f"search {req.item_id} [{req.store}] started")
+    background(answer_find(ctx, sender, req))
+
+
+async def answer_find(ctx: Context, sender: str, req: FindProduct):
     start = time.monotonic()
     try:
         result = FindResult(item_id=req.item_id, user_id=req.user_id, ok=True,
