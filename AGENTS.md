@@ -7,7 +7,7 @@ The rules for anyone (human or coding agent) working in this repo. Verified agai
 Fetch.ai uAgents that find money users are owed on past purchases. Users only talk to it inside an ASI:One chat. Fetch.ai track, Cal Hacks 13.0 (Oct 23–25, 2026).
 
 **Phase 1 (must ship):** user adds an item in ASI:One → we fetch its live price with Bright Data → chat shows "Dropped $X" or "No change".
-**Phase 2 (should ship):** new order emails arrive automatically (Gmail → Pipedream → FastAPI) and become tracked items.
+**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (Gmail → Pipedream → FastAPI).
 **Phase 3 (if time):** refund policy check, claim draft, Payment Protocol.
 
 Build in phase order. Don't start a phase until the one before works in ASI:One.
@@ -18,9 +18,9 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 
 | Agent | File | Phase | Job | Receives | Sends |
 | --- | --- | --- | --- | --- | --- |
-| Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices | `ChatMessage` (user), `PriceResult` | `ChatMessage` + cards, `TrackItem` |
+| Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
 | Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data | `TrackItem` | `PriceResult` |
-| Parser agent | `parser_agent.py` | 2 | Turns an order email into a tracked item | `Receipt` (from the webhook) | `TrackItem` |
+| Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
 | Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
 
@@ -28,13 +28,15 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pi
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
+**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow.
+
 ## Who owns what (2 people)
 
 | | Person A: ASI:One side | Person B: data side |
 | --- | --- | --- |
 | Owns | `agent.py`, `store.py`, cards, README, demo video | `price_agent.py`, `parser_agent.py`, `server.py`, Pipedream |
 | Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path 1) → price agent answers `TrackItem` with `PriceResult` |
-| Phase 2 | Show email-sourced items in the carousel | FastAPI on Railway + Pipedream → parser agent |
+| Phase 2 | Accept photos in chat → `Receipt` to parser → review card of parsed items → save confirmed items | Parser agent (vision model reads photos, LLM reads email text) → then FastAPI on Railway + Pipedream |
 | Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
 
 `models.py` is shared: write it together first and change it only together. Work on separate branches and merge often.
@@ -61,13 +63,29 @@ class PriceResult(Model):     # price agent -> coordinator
     checked_at: str = ""      # ISO 8601 UTC
     error: Optional[str] = None
 
-class Receipt(Model):         # webhook -> parser agent (Phase 2)
-    message_id: str
+class Receipt(Model):         # coordinator or webhook -> parser agent (Phase 2)
+    message_id: str           # Gmail id, or "photo_" + uuid for uploads
     user_id: str
     sender: str = ""
     subject: str = ""
     date: str = ""
-    body: str = ""            # plain text, max 8,000 chars
+    body: str = ""            # email plain text, max 8,000 chars
+    image_url: str = ""       # receipt photo URL from ASI:One (photo uploads)
+
+class ReceiptItem(Model):
+    name: str
+    price_paid: float
+    product_url: str = ""     # emails often have one; paper receipts don't
+
+class ParsedReceipt(Model):   # parser agent -> coordinator
+    message_id: str
+    user_id: str
+    ok: bool
+    store: str = ""           # "amazon" | "walmart" | "other"
+    purchase_date: str = ""   # YYYY-MM-DD
+    order_number: str = ""
+    items: list[ReceiptItem] = []
+    error: Optional[str] = None
 ```
 
 A price counts as dropped when `price_paid - current_price > 1` and `ok` is true.
@@ -88,7 +106,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`. `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and `OPENAI_API_KEY` only if `asi1` can't read images (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
 - **Ports:** coordinator 8001, price agent 8002, parser agent 8003.
 
@@ -243,6 +261,45 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 - Skip the MCP `extract` tool: it relies on MCP sampling, which our client doesn't implement. Path C does the same job.
 - Never log the API key or a URL containing `?token=`.
 
+## Receipt photos (Phase 2)
+
+Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5).
+
+**1. Tell ASI:One we accept attachments.** When a `StartSessionContent` arrives, reply with:
+```python
+MetadataContent(type="metadata", metadata={"attachments": "true"})
+```
+Without this, users can't attach a photo to our agent.
+
+**2. Get the image URL** (coordinator). The photo arrives as `ResourceContent`; its `.resource` is one `Resource` or a list. Take the first http(s) URL from `resource.uri`, else from `resource.metadata` keys `url`, `uri`, `source`, `image_url`. The agent can't download from ASI:One's private storage, only these URLs. No URL → reply "Couldn't read that attachment, please re-upload".
+```python
+from urllib.parse import urlparse
+
+def image_url(item) -> str | None:
+    res = item.resource if isinstance(item.resource, list) else [item.resource]
+    for r in res:
+        for cand in [r.uri, *(r.metadata.get(k, "") for k in ("url", "uri", "source", "image_url"))]:
+            u = urlparse(cand or "")
+            if u.scheme in ("http", "https") and u.netloc:
+                return cand
+    return None
+```
+Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="photo_"+uuid, user_id=sender, image_url=url)` to the parser agent.
+
+**3. Read the receipt** (parser agent). Send the image URL to a vision model with temperature 0 and ask for strict JSON matching `ParsedReceipt` (store, purchase_date, order_number, items with name and price_paid).
+- **Test first whether `asi1` accepts images.** Send one chat completion with an `image_url` content part. Fetch's docs don't say either way.
+- If it doesn't, use OpenAI `gpt-4.1-mini` (what Fetch's example uses) with `OPENAI_API_KEY`. Pick one on purpose and write it in the README; no silent fallback.
+- Same prompt and output for email text (`Receipt.body`), so photos and emails share one parser.
+- Unreadable photo, or no items found → `ParsedReceipt(ok=False, error=...)`.
+
+**4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
+
+**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`, show a `form` card asking for the link. Later, if there's time: search for it (Bright Data MCP `search_engine`, or Amazon's Products Search scraper `gd_lwdb4vjm1ehb499uxs`) and let the user pick from a `carousel`.
+
+**Rules**
+- Only use the photo URL to read the receipt; don't store the image. Keep only the parsed fields.
+- Never log image URLs (they can be signed links) or full receipt text.
+
 ## Submission checklist
 
 - [ ] README lists every agent's name and address, plus both badges:
@@ -265,5 +322,6 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 - [Scraper API limits](https://docs.brightdata.com/products/scrapers/limits.md): one input per sync request, 25 × 429 in 5 min blocks the IP
 - [Free tier](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier.md): 5,000 shared credits/month
 - [Bright Data MCP overview](https://docs.brightdata.com/products/mcp-server/overview.md), [remote quickstart](https://docs.brightdata.com/products/mcp-server/remote/quickstart), [tools](https://docs.brightdata.com/products/mcp-server/tools), [advanced config](https://docs.brightdata.com/products/mcp-server/remote/advanced)
+- [Image analysis agent example, docs v1.0.5](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent): `{"attachments": "true"}` on session start, image URL from `ResourceContent`, OpenAI `gpt-4.1-mini`
 - [Fetch.ai CalHacks 13.0 hackpack](https://innovationlab.fetch.ai/events/hackathons/calhacks-13-0/hackpack)
 - PyPI release data; sandbox tests of uagents 0.26.1 on Python 3.13 vs 3.14 and the mcp 2.3.0 client API

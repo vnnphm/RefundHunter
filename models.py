@@ -1,5 +1,4 @@
 from typing import Optional
-
 from uagents import Model
 
 
@@ -19,10 +18,28 @@ class PriceResult(Model):     # price agent -> coordinator
     error: Optional[str] = None
 
 
-class Receipt(Model):         # webhook -> parser agent (Phase 2)
-    message_id: str
+class Receipt(Model):         # coordinator or webhook -> parser agent (Phase 2)
+    message_id: str           # Gmail id, or "photo_" + uuid for uploads
     user_id: str
     sender: str = ""
     subject: str = ""
     date: str = ""
-    body: str = ""            # plain text, max 8,000 chars
+    body: str = ""            # email plain text, max 8,000 chars
+    image_url: str = ""       # receipt photo URL from ASI:One (photo uploads)
+
+
+class ReceiptItem(Model):
+    name: str
+    price_paid: float
+    product_url: str = ""     # emails often have one; paper receipts don't
+
+
+class ParsedReceipt(Model):   # parser agent -> coordinator
+    message_id: str
+    user_id: str
+    ok: bool
+    store: str = ""           # "amazon" | "walmart" | "other"
+    purchase_date: str = ""   # YYYY-MM-DD
+    order_number: str = ""
+    items: list[ReceiptItem] = []
+    error: Optional[str] = None
