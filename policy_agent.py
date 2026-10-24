@@ -23,7 +23,9 @@ POLICY_LIMIT = 6000   # chars of the store's policy page sent to asi1
 PRODUCT_LIMIT = 2000  # chars of return lines from the product page
 CACHE_TTL_S = 24 * 3600  # policies rarely change and credits are shared: one scrape per store/link a day
 RETURN_WORDS = re.compile(r"return|refund|replace", re.I)
-KEYWORDS = re.compile(r"return|refund|replace|exchange|price (adjust|match|protect|guarantee)|\bdays?\b", re.I)
+# Spanish too: Bright Data sometimes gets a store's Spanish page (walmart.com did in testing).
+KEYWORDS = re.compile(r"return|refund|replace|exchange|price (adjust|match|protect|guarantee)|\bdays?\b"
+                      r"|devoluci|devolver|reembols|\bd[ií]as\b", re.I)
 
 SEED = os.getenv("POLICY_AGENT_SEED", "")
 if not SEED or SEED.startswith("change-me"):
@@ -44,8 +46,9 @@ e.g. "Non-returnable" or "Returnable until Jan 31"). Return only JSON:
   Use the window for this item's category if the policy lists one, otherwise the standard window.
 - price_adjust_days: days after purchase the store refunds the difference if the price drops,
   0 if the policy says it doesn't do price adjustments, null if the page doesn't say
-- summary: one or two plain sentences for the shopper: can they return it, by when, and whether
-  the store refunds a price drop. Don't invent rules the pages don't state."""
+- summary: one or two plain sentences in English for the shopper: can they return it, by when, and whether
+  the store refunds a price drop. Don't invent rules the pages don't state.
+The pages may be in another language (e.g. Spanish); read them all the same."""
 
 SCHEMA = {
     "name": "refund_policy",
@@ -90,19 +93,33 @@ def policy_link(results: str, domain: str) -> str | None:
     return next((u for u in links if re.search(r"return|refund", u, re.I)), links[0] if links else None)
 
 
+def plain(markdown: str) -> str:
+    """Markdown links and images to their text, bare URLs dropped: nav links like
+    "?return_to=…" would otherwise match the keywords and crowd out the policy."""
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", markdown)
+    text = re.sub(r"\]?\\?\(?https?://\S+", "", text)
+    text = re.sub(r"(?m)^\s*(\d+)\s*\n\s*", r"\1 ", text)  # "90" / "days" on separate lines -> "90 days"
+    return text.replace("\\", "")
+
+
 def relevant(markdown: str, limit: int) -> str:
     """Whole page if it fits, else only the lines about returns, refunds and windows."""
+    markdown = plain(markdown)
     if len(markdown) <= limit:
         return markdown
-    keep = [line.strip() for line in markdown.splitlines() if KEYWORDS.search(line)]
-    return "\n".join(line for line in keep if line)[:limit]
+    keep = [line.strip() for line in markdown.splitlines()  # 15..1000: skip stubs and nav menus
+            if KEYWORDS.search(line) and 15 < len(line.strip()) < 1000]
+    return "\n".join(keep)[:limit]
 
 
 async def store_policy(s: ClientSession, domain: str) -> tuple[str, str]:
     cached = _policies.get(domain)
     if cached and time.time() - cached[0] < CACHE_TTL_S:
         return cached[1], cached[2]
-    url = policy_link(await call(s, "search_engine", {"query": f"{domain} return policy"}), domain)
+    query = f"{domain} return policy"
+    url = policy_link(await call(s, "search_engine", {"query": query}), domain)
+    if url is None:  # Google sometimes comes back empty: one more try elsewhere (1 credit)
+        url = policy_link(await call(s, "search_engine", {"query": query, "engine": "bing"}), domain)
     if url is None:
         raise PolicyError(f"couldn't find {domain}'s return policy")
     text = relevant(await call(s, "scrape_as_markdown", {"url": url}), POLICY_LIMIT)
@@ -210,7 +227,7 @@ async def list_tools():
     """Step 0 in AGENTS.md: print the MCP tools we load and their inputs. Costs no credits."""
     async with mcp_session(MCP_TOOLS) as s:
         for t in (await s.list_tools()).tools:
-            print(t.name, json.dumps(t.inputSchema))
+            print(t.name, json.dumps(t.input_schema))
 
 
 async def check_once(url: str, shop: str):

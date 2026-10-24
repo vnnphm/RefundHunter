@@ -1,5 +1,6 @@
 """Bright Data helpers shared by the price and policy agents. Never log the token or a URL holding it."""
 import asyncio
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -17,6 +18,10 @@ DATASETS = {
 }
 POLL_LIMIT_S = 180
 MCP_TIMEOUT_S = 120
+
+# httpx2 (inside mcp) logs every request URL at INFO, and mcp logs it at DEBUG: the MCP URL holds the token.
+for _name in ("httpx", "httpx2", "mcp"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 
 class ScrapeError(Exception):

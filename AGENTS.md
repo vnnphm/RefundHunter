@@ -233,7 +233,7 @@ async def amazon_price(url: str) -> dict:
   ```python
   res = await s.list_tools()
   for t in res.tools:
-      print(t.name, t.inputSchema)
+      print(t.name, t.input_schema)  # mcp 2.x: input_schema, not inputSchema
   ```
 - **B:** `search_scrapers` with the store's domain → `dataset_id` → `get_scraper_details` (input fields, price field) → call Path A's REST endpoint with that `dataset_id`. Look the id up once and save it as a constant.
 - **C:** `scrape_as_markdown` → first ~8,000 chars → ASI:One (`asi1`, temperature 0) returns strict JSON `{"title", "price", "currency", "in_stock"}`.
@@ -284,14 +284,19 @@ Owner: Person B, in `policy_agent.py`. Answers a `TrackItem` with a `PolicyResul
 
 **How it works**
 1. Store domain: `amazon.com` / `walmart.com` for those stores (so `amzn.to` links work), else the product link's host without `www.`.
-2. Store policy page: MCP `search_engine` with `"<domain> return policy"` → first result on the store's own domain, preferring links with "return" or "refund" → `scrape_as_markdown`. Pages over 6,000 chars keep only lines about returns, refunds and days. Cached per domain for 24 h.
-3. Product page, since a product can override the store default ("Non-returnable", "Returnable until Jan 31"): Amazon and Walmart use the same Scraper API record as the price agent (`bd.scrape`) and keep every field that mentions return / refund / replace; other stores use `scrape_as_markdown` and keep those lines (≤ 2,000 chars). Optional: a failed scrape is cached as empty and the store policy alone answers. Cached per link for 24 h. **Unconfirmed:** which return fields the Amazon/Walmart records have; `uv run price_agent.py --check <url>` prints all keys.
+2. Store policy page: MCP `search_engine` with `"<domain> return policy"` (Google; once more on Bing if Google returns no store link) → first result on the store's own domain, preferring links with "return" or "refund" → `scrape_as_markdown`. Links and URLs are stripped first (nav links like `?return_to=` match the keywords); pages still over 6,000 chars keep only lines about returns, refunds and days (English or Spanish). Cached per domain for 24 h.
+3. Product page, since a product can override the store default ("Non-returnable", "Returnable until Jan 31"): Amazon and Walmart use the same Scraper API record as the price agent (`bd.scrape`) and keep every field that mentions return / refund / replace; other stores use `scrape_as_markdown` and keep those lines (≤ 2,000 chars). Optional: a failed scrape is cached as empty and the store policy alone answers. Cached per link for 24 h. Amazon records have `return_policy` (e.g. "FREE 30-day refund/replacement") and `frequently_returned_item_message`; Walmart's fields aren't checked yet (`uv run price_agent.py --check <url> walmart` prints all keys).
 4. `asi1` (temperature 0, JSON schema) reads both and returns `returnable`, `return_days`, `price_adjust_days`, `summary`. Days outside 0–365 become `None`.
 
 **Coordinator side:** `track_new_item` sends the same `TrackItem` to `POLICY_AGENT_ADDRESS` next to the price check. `TrackItem` has no purchase date, so the policy agent returns the window and the coordinator does the date math: return by = `items.purchase_date` (from the receipt) else `added_at` + `return_days`. `PolicyResult` is saved on the item (`store.save_policy`); the detail card gets "Return by" (or "Not returnable"), "Price adjustment" and "Policy" rows. If the price card was already shown, it's re-sent with those rows; if not, the price card includes them. A failed policy check is logged and the card just leaves the rows out.
 
+**Tested live (2026-10-24)** with the real Bright Data key; asi1 step not yet (no `ASI_ONE_API_KEY` in that run):
+- Policy pages found: Amazon `…display.html?nodeId=GKM69DUUYKQWKWX7` (30 days), Walmart `…/walmart-standard-return-policy/…` (90 days, most electronics 30), Target `target.com/returns` (90 days, Target brand 365).
+- Walmart's page came back **in Spanish**; the prompt tells `asi1` to read any language and answer in English.
+- Google once returned no links for Walmart; hence the Bing retry.
+
 **Rules**
-- MCP session URL holds the token: errors are reported by type only, never the exception text or traceback.
+- MCP session URL holds the token: errors are reported by type only, never the exception text or traceback. `bd.py` sets the `httpx`, `httpx2` and `mcp` loggers to WARNING, because `httpx2` logs every request URL (token included) at INFO.
 - One MCP session per check; the whole check costs ≤ 3 credits, and 0 when both pages are cached.
 
 ## Receipt photos (Phase 2)
