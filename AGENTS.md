@@ -7,7 +7,7 @@ The rules for anyone (human or coding agent) working in this repo. Verified agai
 Fetch.ai uAgents that find money users are owed on past purchases. Users only talk to it inside an ASI:One chat. Fetch.ai track, Cal Hacks 13.0 (Oct 23–25, 2026).
 
 **Phase 1 (must ship):** user adds an item in ASI:One → we fetch its live price with Bright Data → chat shows "Dropped $X" or "No change".
-**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (user forwards to a Pipedream inbox → FastAPI `server.py`). See Email receipts.
+**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (a Gmail filter auto-forwards them to a Pipedream inbox → FastAPI `server.py`). See Email receipts.
 **Phase 3 (if time):** refund policy check, claim draft, Payment Protocol.
 
 Build in phase order. Don't start a phase until the one before works in ASI:One.
@@ -319,16 +319,41 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 ## Email receipts (Phase 2)
 
-Owner: Person A. Users forward order emails to one shared inbox; the coordinator matches the sender to a linked ASI:One user. No Gmail OAuth.
+Owner: Person A. Users set up a Gmail filter once that auto-forwards order emails to one shared inbox (or forward by hand); the coordinator matches the user's address to a linked ASI:One user. No Gmail OAuth: Testing mode works without Google's review, but a push inbox is instant and stores no tokens.
 
 **Linking.** Menu → **Link my email** (or "link my email you@x.com") → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
 
-**Pipedream** (no code in repo)
-1. New workflow, trigger **Email** ("new email received"). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
-2. Step: HTTP POST to `<server URL>/email`, header `X-Webhook-Secret: <WEBHOOK_SECRET>`, JSON `{"message_id", "from", "subject", "date", "text", "html"}` from the trigger event.
-3. A forwarded email's `from` is the person who forwarded it, which is what linking matches.
+**Pipedream** (only the code step below lives outside the repo)
+1. New workflow, trigger **Email** ("New Email Received"; instant, not polled). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
+2. Workflow **Settings → Environment Variables**: `WEBHOOK_SECRET` (same as `.env` and Vercel) and `REFUND_SERVER_URL` (Vercel URL, no trailing slash).
+3. Step **Node → Run Node code**. The trigger's `from` is an object, so map it here:
+   ```js
+   export default defineComponent({
+     async run({ steps }) {
+       const e = steps.trigger.event;
+       const res = await fetch(`${process.env.REFUND_SERVER_URL}/email`, {
+         method: "POST",
+         headers: { "Content-Type": "application/json", "X-Webhook-Secret": process.env.WEBHOOK_SECRET },
+         body: JSON.stringify({
+           message_id: e.messageId || e.headers?.["message-id"] || `pd_${Date.now()}`,
+           from: e.from?.value?.[0]?.address || e.from?.text || "",
+           forwarded_for: e.headers?.["x-forwarded-for"] || "",
+           subject: e.subject || "", date: String(e.date || ""),
+           text: e.text || "", html: e.html || "",
+         }),
+       });
+       const body = await res.text();
+       if (!res.ok) throw new Error(`server ${res.status}: ${body}`);
+       return body;
+     },
+   });
+   ```
+4. Each user, once in Gmail: Settings → **Forwarding and POP/IMAP** → add the inbox address (Gmail mails a confirm link to it: open it from the trigger's event list). Then a filter `from:(amazon.com OR walmart.com) subject:(order OR ordered)` → **Forward to** the inbox.
+5. Who it's from: a hand-forwarded email's `from` is the user. A filter auto-forward keeps the store as `from` and puts the user in `X-Forwarded-For` (`user@gmail.com inbox@…`); `server.py` prefers that. Confirm the header in the first real event.
 
-**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the address out of `from`, turns HTML-only mail into text (keeping link targets), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Railway for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
+Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `422` no sender found, `502` coordinator unreachable, `{"ok":true}` but no card → address not linked or a repeated `message_id`.
+
+**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the user's address from `forwarded_for` (else `from`), turns HTML-only mail into text (keeping link targets), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Vercel (zero-config FastAPI) for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
 
 **Coordinator.** Unlinked sender → dropped (logged by domain only). Linked → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. `ParsedReceipt` → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
 

@@ -45,6 +45,7 @@ class Email(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     message_id: str
     sender: str = Field("", alias="from")  # "Name <a@b.com>" or "a@b.com"
+    forwarded_for: str = ""  # Gmail filter forwards: X-Forwarded-For "user@gmail.com inbox@…"
     subject: str = ""
     date: str = ""
     text: str = ""
@@ -72,7 +73,9 @@ def receive_email(email: Email, x_webhook_secret: str = Header(default="")):
         raise HTTPException(status_code=401, detail="bad secret")
     if not COORDINATOR_ADDRESS:
         raise HTTPException(status_code=503, detail="COORDINATOR_ADDRESS is not set")
-    from_addr = parseaddr(email.sender)[1].lower()
+    # A filter auto-forward keeps the store as `from`; the user is in X-Forwarded-For instead.
+    fwd = re.search(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", email.forwarded_for)
+    from_addr = (fwd.group(0) if fwd else parseaddr(email.sender)[1]).lower()
     if "@" not in from_addr:
         raise HTTPException(status_code=422, detail="no sender address")
     receipt = Receipt(message_id=email.message_id, user_id="", sender=from_addr,
