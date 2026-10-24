@@ -21,7 +21,7 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
 | Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data | `TrackItem` | `PriceResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
-| Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
+| Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when; does the store refund a price drop (Bright Data MCP + `asi1`) | `TrackItem` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
 
 Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pipedream, Bright Data.
@@ -88,6 +88,17 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     order_number: str = ""
     items: list[ReceiptItem] = []
     error: Optional[str] = None
+
+class PolicyResult(Model):    # policy agent -> coordinator (Phase 3)
+    item_id: str
+    ok: bool
+    returnable: Optional[bool] = None         # False = store says this item can't be returned
+    return_days: Optional[int] = None         # return window; refundable until purchase date + this
+    price_adjust_days: Optional[int] = None   # days the store refunds a price drop; 0 = never
+    summary: str = ""                         # one or two sentences for the chat card
+    policy_url: str = ""                      # the store policy page that was read
+    checked_at: str = ""                      # ISO 8601 UTC
+    error: Optional[str] = None
 ```
 
 A price counts as dropped when `price_paid - current_price > 1` and `ok` is true.
@@ -108,9 +119,9 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `POLICY_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `POLICY_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
-- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, email webhook (`server.py`) 8000.
+- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, policy agent 8004, email webhook (`server.py`) 8000.
 
 ## Run and connect
 
@@ -258,12 +269,30 @@ async def read_price(markdown: str) -> dict:
 Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 **Rules**
-- Only the price agent calls Bright Data. The coordinator says "Checking price…" and sends the card when `PriceResult` arrives.
+- Only the price and policy agents call Bright Data. The coordinator says "Checking price…" and sends the card when `PriceResult` arrives.
 - Every failure (timeout, 4xx/5xx, empty record, no price) becomes `PriceResult(ok=False, error=...)`. Never let the handler raise.
 - Accept only a positive number as a price.
 - Don't re-scrape a URL within a few minutes; reuse the stored price and `checked_at`. Credits are shared.
 - Skip the MCP `extract` tool: it relies on MCP sampling, which our client doesn't implement. Path C does the same job.
 - Never log the API key or a URL containing `?token=`.
+
+## Refund policies (Phase 3)
+
+Owner: Person B, in `policy_agent.py`. Answers a `TrackItem` with a `PolicyResult`: can this item be returned, how many days the window is, and whether the store refunds a price drop (the case Refund Hunter cares about most). Uses Bright Data's MCP (Path B/C above), not a hand-written scraper.
+
+**Status:** built; not yet called by the coordinator. Test one link (2–3 credits + one `asi1` call): `uv run policy_agent.py --check <url> [amazon|walmart|other]`. `uv run policy_agent.py --tools` prints the MCP tools and their inputs (Step 0, free).
+
+**How it works**
+1. Store domain: `amazon.com` / `walmart.com` for those stores (so `amzn.to` links work), else the product link's host without `www.`.
+2. Store policy page: MCP `search_engine` with `"<domain> return policy"` → first result on the store's own domain, preferring links with "return" or "refund" → `scrape_as_markdown`. Pages over 6,000 chars keep only lines about returns, refunds and days. Cached per domain for 24 h.
+3. Product page: `scrape_as_markdown` on the item link, keeping only lines with return / refund / replace (≤ 2,000 chars), since a product can override the store default ("Non-returnable", "Returnable until Jan 31"). Optional: a failed scrape is cached as empty and the store policy alone answers. Cached per link for 24 h.
+4. `asi1` (temperature 0, JSON schema) reads both and returns `returnable`, `return_days`, `price_adjust_days`, `summary`. Days outside 0–365 become `None`.
+
+**Coordinator side (next):** send the same `TrackItem` to `POLICY_AGENT_ADDRESS` next to the price check; refundable until = purchase date (else `added_at`) + `return_days`. `TrackItem` has no purchase date, so the policy agent returns the window and the coordinator does the date math. Show `summary` and the deadline on the detail card; `price_adjust_days == 0` means a return-and-rebuy is the only way to get the drop back.
+
+**Rules**
+- MCP session URL holds the token: errors are reported by type only, never the exception text or traceback.
+- One MCP session per check; the whole check costs ≤ 3 credits, and 0 when both pages are cached.
 
 ## Receipt photos (Phase 2)
 

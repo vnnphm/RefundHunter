@@ -43,3 +43,15 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     order_number: str = ""
     items: list[ReceiptItem] = []
     error: Optional[str] = None
+
+
+class PolicyResult(Model):    # policy agent -> coordinator (Phase 3)
+    item_id: str
+    ok: bool
+    returnable: Optional[bool] = None         # False = store says this item can't be returned
+    return_days: Optional[int] = None         # return window; refundable until purchase date + this
+    price_adjust_days: Optional[int] = None   # days the store refunds a price drop; 0 = never
+    summary: str = ""                         # one or two sentences for the chat card
+    policy_url: str = ""                      # the store policy page that was read
+    checked_at: str = ""                      # ISO 8601 UTC
+    error: Optional[str] = None
