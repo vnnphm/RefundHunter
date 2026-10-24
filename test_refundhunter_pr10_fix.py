@@ -32,7 +32,7 @@ class FixTests(unittest.TestCase):
         ns = {'date': datetime.date}
         cls.valid_date = staticmethod(load_function('agent.py', 'valid_purchase_date', ns))
         policy_ns = {'date': datetime.date, 'datetime': datetime.datetime, 'timezone': datetime.timezone,
-                     'timedelta': datetime.timedelta, 'POLICIES': {}, 'PolicyResult': Model}
+                     'timedelta': datetime.timedelta, 'POLICIES': {}, 'PolicyRequest': Model, 'PolicyResult': Model}
         policy_text = Path('policy_agent.py').read_text()
         policy_ns['POLICIES'] = ast.literal_eval(next(n.value for n in ast.parse(policy_text).body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'POLICIES' for t in n.targets)))
         load_function('policy_agent.py', 'parse_purchase_date', policy_ns)
