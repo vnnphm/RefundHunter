@@ -331,15 +331,17 @@ Owner: Person A. Users set up a Gmail filter once that auto-forwards order email
    export default defineComponent({
      async run({ steps }) {
        const e = steps.trigger.event;
+       const addr = v => typeof v === "string" ? v
+         : (v?.value || []).map(a => a.address).filter(Boolean).join(", ") || v?.text || v?.address || "";
+       const hdr = n => Object.entries(e.headers || {}).find(([k]) => k.toLowerCase() === n)?.[1];
        const res = await fetch(`${process.env.REFUND_SERVER_URL}/email`, {
          method: "POST",
          headers: { "Content-Type": "application/json", "X-Webhook-Secret": process.env.WEBHOOK_SECRET },
          body: JSON.stringify({
-           message_id: e.messageId || e.headers?.["message-id"] || `pd_${Date.now()}`,
-           from: [e.from, e.headers?.from, e.mail_from, e.envelope?.from]  // shape varies by event
-             .map(v => typeof v === "string" ? v : v?.value?.[0]?.address || v?.text || v?.address || "")
-             .find(Boolean) || "",
-           forwarded_for: e.headers?.["x-forwarded-for"] || "",
+           message_id: e.messageId || hdr("message-id") || `pd_${Date.now()}`,
+           from: [e.from, hdr("from"), e.mail_from, e.envelope?.from].map(addr).find(Boolean) || "",
+           forwarded_for: addr(hdr("x-forwarded-for")),
+           to: [e.to, hdr("to")].map(addr).find(Boolean) || "",
            subject: e.subject || "", date: String(e.date || ""),
            text: e.text || "", html: e.html || "",
          }),
@@ -349,13 +351,18 @@ Owner: Person A. Users set up a Gmail filter once that auto-forwards order email
        return body;
      },
    });
+       const body = await res.text();
+       if (!res.ok) throw new Error(`server ${res.status}: ${body}`);
+       return body;
+     },
+   });
    ```
 4. Each user, once in Gmail: Settings → **Forwarding and POP/IMAP** → add the inbox address (Gmail mails a confirm link to it: open it from the trigger's event list). Then a filter by keywords, so any store works. Has the words: `subject:(order OR receipt OR purchase) ("order total" OR "order number" OR "order #" OR subtotal)`; Doesn't have: `shipped OR delivered OR "out for delivery" OR refund OR return` (shipping updates would repeat the order) → **Forward to** the inbox.
-5. Who it's from: a hand-forwarded email's `from` is the user. A filter auto-forward keeps the store as `from` and puts the user in `X-Forwarded-For` (`user@gmail.com inbox@…`); `server.py` prefers that. Confirm the header in the first real event.
+5. Who it's from: a hand-forwarded email's `from` is the user. A filter auto-forward keeps the store as `from`, but the original `To` is still the user (and Gmail may add `X-Forwarded-For: user@gmail.com inbox@…`). `server.py` uses `X-Forwarded-For`, else the first `To` when the `@upload.pipedream.net` inbox isn't among them (auto-forward), else `from` (hand forward).
 
 Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `422` no sender found, `502` coordinator unreachable, `{"ok":true}` but no card → address not linked or a repeated `message_id`.
 
-**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the user's address from `forwarded_for` (else `from`), turns HTML-only mail into text (keeping link targets), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Vercel (zero-config FastAPI) for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
+**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the user's address from `forwarded_for`, else `to` on an auto-forward, else `from`, turns HTML-only mail into text (keeping link targets), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Vercel (zero-config FastAPI) for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
 
 **Coordinator.** Unlinked sender → dropped (logged by domain only). Linked → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. A `ParsedReceipt` with no priced items is dropped quietly for emails (a broad filter lets some non-receipts through), but photos get "couldn't read the items". Otherwise → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
 

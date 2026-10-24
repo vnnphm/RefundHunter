@@ -35,6 +35,8 @@ identity = Identity.from_seed(SEED, 0)
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 COORDINATOR_ADDRESS = os.getenv("COORDINATOR_ADDRESS", "").strip()
 MAX_BODY = 8000
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+INBOX_DOMAIN = "@upload.pipedream.net"
 
 log = logging.getLogger("server")
 logging.basicConfig(level=logging.INFO)
@@ -46,10 +48,22 @@ class Email(BaseModel):
     message_id: str
     sender: str = Field("", alias="from")  # "Name <a@b.com>" or "a@b.com"
     forwarded_for: str = ""  # Gmail filter forwards: X-Forwarded-For "user@gmail.com inbox@…"
+    to: str = ""  # an auto-forward keeps the original To (the user); a hand forward has our inbox
     subject: str = ""
     date: str = ""
     text: str = ""
     html: str = ""
+
+
+def user_address(email: Email) -> str:
+    """Whose receipt this is. A filter auto-forward keeps the store as `from`, so look at
+    X-Forwarded-For, then the original To, before falling back to `from` (a hand forward)."""
+    if fwd := EMAIL_RE.search(email.forwarded_for):
+        return fwd.group(0).lower()
+    to = [a.lower() for a in EMAIL_RE.findall(email.to)]
+    if to and not any(a.endswith(INBOX_DOMAIN) for a in to):  # not sent to our inbox: auto-forwarded
+        return to[0]
+    return parseaddr(email.sender)[1].lower()
 
 
 def plain_text(email: Email) -> str:
@@ -73,9 +87,7 @@ def receive_email(email: Email, x_webhook_secret: str = Header(default="")):
         raise HTTPException(status_code=401, detail="bad secret")
     if not COORDINATOR_ADDRESS:
         raise HTTPException(status_code=503, detail="COORDINATOR_ADDRESS is not set")
-    # A filter auto-forward keeps the store as `from`; the user is in X-Forwarded-For instead.
-    fwd = re.search(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", email.forwarded_for)
-    from_addr = (fwd.group(0) if fwd else parseaddr(email.sender)[1]).lower()
+    from_addr = user_address(email)
     if "@" not in from_addr:
         raise HTTPException(status_code=422, detail="no sender address")
     receipt = Receipt(message_id=email.message_id, user_id="", sender=from_addr,
