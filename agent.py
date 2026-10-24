@@ -31,6 +31,7 @@ chat = Protocol(spec=chat_protocol_spec)
 
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 ITEM_ID_RE = re.compile(r"\bit_[0-9a-f]{8}\b")
+ACTION_RE = re.compile(r"\b(submit_item|add_item|upload_receipt|list_items|view_item)\b")
 
 
 # ---- Messages ----------------------------------------------------------------
@@ -76,6 +77,8 @@ def menu_card() -> dict:
                  "action": {"selection": {"action": "add_item"}}},
                 {"type": "button", "label": "Upload a receipt photo",
                  "action": {"selection": {"action": "upload_receipt"}}},
+                {"type": "button", "label": "My items",
+                 "action": {"selection": {"action": "list_items"}}},
             ]},
         ],
     }}
@@ -115,8 +118,35 @@ def price_detail(item: dict, mock: bool) -> dict:
         "title": item["name"] or "Your item",
         "summary_rows": rows,
         "ctas": [{"label": "Track another item", "primary": True,
-                  "selection": {"action": "add_item", "item_id": item["item_id"]}}],
+                  "selection": {"action": "add_item", "item_id": item["item_id"]}},
+                 {"label": "See all items",
+                  "selection": {"action": "list_items", "item_id": item["item_id"]}}],
     }
+
+
+def items_carousel(items: list[dict]) -> dict:
+    tiles = []
+    for it in items[:10]:
+        now = it["current_price"]
+        if now is None:
+            badge, secondary = {"label": "Checking…", "variant": "warning"}, "Not checked yet"
+        elif it["price_paid"] - now > 1:
+            badge = {"label": f"Dropped ${it['price_paid'] - now:.2f}", "variant": "success"}
+            secondary = f"Now ${now:.2f}"
+        else:
+            badge, secondary = {"label": "No change", "variant": "info"}, f"Now ${now:.2f}"
+        tiles.append({
+            "id": it["item_id"],
+            "title": it["name"] or it["store"].title() + " item",
+            "subtitle": f"{it['store'].title()} · paid ${it['price_paid']:.2f}",
+            "badges": [badge],
+            "secondary_text": secondary,
+            "primary_cta": {"label": "View",
+                            "selection": {"action": "view_item", "item_id": it["item_id"]}},
+        })
+    return {"title": "Your tracked items",
+            "subtitle": f"{len(items)} item{'s' if len(items) != 1 else ''}",
+            "items": tiles}
 
 
 # ---- Parsing -----------------------------------------------------------------
@@ -126,22 +156,34 @@ def parse_selection(text: str) -> dict:
     try:
         data = json.loads(text)
         if isinstance(data, dict):
-            return data
+            return data.get("selection") if isinstance(data.get("selection"), dict) else data
     except ValueError:
         pass
     sel: dict = {}
     lower = text.lower()
+    # The planner usually repeats our action names verbatim; trust those first.
+    named = ACTION_RE.search(lower)
     if m := ITEM_ID_RE.search(text):
         sel["item_id"] = m.group(0)
     if m := URL_RE.search(text):
         sel["product_url"] = m.group(0).rstrip(".,)")
     if m := re.search(r"\$\s*(\d+(?:\.\d{1,2})?)|price[^0-9$]{0,20}(\d+(?:\.\d{1,2})?)", lower):
         sel["price_paid"] = m.group(1) or m.group(2)
-    if "item_id" in sel and "price_paid" in sel:
+    if named:
+        sel["action"] = named.group(1)
+    elif "item_id" in sel and "price_paid" in sel:
         sel["action"] = "submit_item"
     elif "receipt" in lower or "photo" in lower or "upload" in lower:
         sel["action"] = "upload_receipt"
-    elif "add" in lower or "track" in lower:
+    elif "add" in lower or "another" in lower:
+        sel["action"] = "add_item"
+    elif re.search(r"\b(see all|all items|my items)\b", lower):
+        sel["action"] = "list_items"
+    elif "item_id" in sel:  # a carousel tile was picked
+        sel["action"] = "view_item"
+    elif re.search(r"\b(my items|items|tracked|list)\b", lower):
+        sel["action"] = "list_items"
+    elif "track" in lower:
         sel["action"] = "add_item"
     return sel
 
@@ -251,6 +293,21 @@ async def handle_text(ctx: Context, sender: str, text: str):
         await ctx.send(sender, card(
             "Got the link. What did you pay?" if url else "Add the item you bought.",
             "form", add_item_form(new_item_id(), url)))
+    elif action == "list_items":
+        items = store.list_items(sender)
+        if not items:
+            await ctx.send(sender, card("You're not tracking anything yet.", "custom", menu_card()))
+            return
+        await ctx.send(sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
+    elif action == "view_item":
+        item = store.get_item(sel.get("item_id", ""))
+        if item is None or item["user_id"] != sender:
+            await ctx.send(sender, reply("I couldn't find that item."))
+        elif item["current_price"] is None:
+            await ctx.send(sender, reply("Still checking the price on that one. Try again in a moment."))
+        else:
+            await ctx.send(sender, card(item["name"] or "Your item", "detail",
+                                        price_detail(item, mock=not PRICE_AGENT_ADDRESS)))
     elif action == "upload_receipt":
         await ctx.send(sender, reply(
             "Attach a photo of your receipt with the paperclip button and send it."))
