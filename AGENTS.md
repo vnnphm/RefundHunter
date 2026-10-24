@@ -296,7 +296,7 @@ Owner: Person B, in `policy_agent.py`. Answers a `TrackItem` with a `PolicyResul
 - Google once returned no links for Walmart; hence the Bing retry.
 - Bing wraps result links in `bing.com/ck/a?…&u=a1<base64>` redirects; `policy_link` decodes them, or the Bing retry finds nothing.
 - `asi1` results: Amazon `B09XS7JWHH` → returnable, 30 days. Walmart onn 32" Roku TV → returnable, 30 days (electronics). Target (a Threshold towels page) → returnable, 90 days, summary mentions Target brand 365. `price_adjust_days` came back `null` for all three: none of the policy pages mention price adjustments.
-- walmart.com's policy-page scrape failed once (`scrape_as_markdown` error) and worked on the next try; that check returns `ok=False` and the card leaves the policy rows out.
+- walmart.com's policy-page scrape failed in 2 of 3 runs (`scrape_as_markdown` error, same page scraped fine in between): not retried, to save credits; that check returns `ok=False` and the card leaves the policy rows out.
 
 **Rules**
 - MCP session URL holds the token: errors are reported by type only, never the exception text or traceback. `bd.py` sets the `httpx`, `httpx2` and `mcp` loggers to WARNING, because `httpx2` logs every request URL (token included) at INFO.
