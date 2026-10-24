@@ -3,7 +3,9 @@ name = "refundhunter"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "fastapi==0.162.0",
     "httpx==0.28.1",
     "python-dotenv==1.2.4",
     "uagents==0.26.1",
+    "uvicorn==0.54.0",
 ]

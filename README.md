@@ -8,3 +8,4 @@
 4. `uv run agent.py`, then follow "Run and connect" in `AGENTS.md`.
 5. In a second terminal: `uv run price_agent.py`, connect its mailbox the same way, then put its address in `.env` as `PRICE_AGENT_ADDRESS` and restart `agent.py`. It also needs `BRIGHTDATA_API_TOKEN`. Without the price agent, the coordinator shows test prices.
 6. To test Bright Data alone (1 credit): `uv run price_agent.py --check <url> amazon` (or `walmart`).
+7. Email receipts: run `uv run uvicorn server:app --port 8000` and follow "Email receipts" in `AGENTS.md` (Pipedream inbox, linking, keys).
