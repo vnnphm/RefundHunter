@@ -35,7 +35,7 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pi
 | | Person A: ASI:One side | Person B: data side |
 | --- | --- | --- |
 | Owns | `agent.py`, `store.py`, cards, README, demo video | `price_agent.py`, `parser_agent.py`, `server.py`, Pipedream |
-| Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path 1) → price agent answers `TrackItem` with `PriceResult` |
+| Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path A) → price agent answers `TrackItem` with `PriceResult` |
 | Phase 2 | Accept photos in chat → `Receipt` to parser → review card of parsed items → save confirmed items | Parser agent (vision model reads photos, LLM reads email text) → then FastAPI on Railway + Pipedream |
 | Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
 
@@ -159,10 +159,12 @@ Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Base
 | Store | Path | Why |
 | --- | --- | --- |
 | Amazon | **A: Scraper API** (REST), dataset `gd_l7q7dkf244hwjntr0` | Ready-made scraper; returns `final_price` directly |
-| Anything else (Walmart, Target, …) | **B: MCP** `search_scrapers` → if a scraper exists, run it via Path A with its `dataset_id` | Bright Data says don't build a scraper for a site that has one |
+| Walmart | **A: Scraper API** (REST), dataset `gd_l95fol7l1ru6rlo116` | Ready-made scraper; price field not yet confirmed (`--check` prints it) |
+| Anything else (Target, …) | **B: MCP** `search_scrapers` → if a scraper exists, run it via Path A with its `dataset_id` | Bright Data says don't build a scraper for a site that has one |
 | No scraper found | **C: MCP** `scrape_as_markdown` → ASI:One reads the price | Works on any page |
 
-Build Path A first; it covers the demo. Add C as the general fallback, then B if there's time.
+**Built:** Path A for Amazon and Walmart in `price_agent.py`. `store: "other"` replies `ok=False, error="store not supported yet"` until C is added. Dataset ids come from [scrapers.json](https://docs.brightdata.com/scrapers.json).
+Test one link without starting the agent (costs one credit): `uv run price_agent.py --check <url> [amazon|walmart]`.
 
 **Auth and budget**
 - One API key. REST: `Authorization: Bearer <BRIGHTDATA_API_TOKEN>`. MCP: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`.

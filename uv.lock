@@ -699,12 +699,14 @@ name = "refundhunter"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "python-dotenv" },
     { name = "uagents" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "python-dotenv", specifier = "==1.2.4" },
     { name = "uagents", specifier = "==0.26.1" },
 ]
