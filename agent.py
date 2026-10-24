@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -13,8 +14,12 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 import store
+from models import PriceResult, TrackItem
 
 load_dotenv()
+
+# Empty until the price agent is running: the coordinator mocks PriceResult instead.
+PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 
 agent = Agent(
     name="refund-hunter",
@@ -95,6 +100,25 @@ def add_item_form(item_id: str, product_url: str = "") -> dict:
     }
 
 
+def price_detail(item: dict, mock: bool) -> dict:
+    drop = item["price_paid"] - item["current_price"]
+    rows = [
+        {"label": "You paid", "value": f"${item['price_paid']:.2f}"},
+        {"label": "Price now", "value": f"${item['current_price']:.2f}"},
+        {"label": "Result", "value": f"Dropped ${drop:.2f}" if drop > 1 else "No change"},
+        {"label": "Store", "value": item["store"].title()},
+        {"label": "Checked", "value": item["checked_at"][:16].replace("T", " ") + " UTC"},
+    ]
+    if mock:
+        rows.append({"label": "Note", "value": "Test price: price agent not connected yet"})
+    return {
+        "title": item["name"] or "Your item",
+        "summary_rows": rows,
+        "ctas": [{"label": "Track another item", "primary": True,
+                  "selection": {"action": "add_item", "item_id": item["item_id"]}}],
+    }
+
+
 # ---- Parsing -----------------------------------------------------------------
 
 def parse_selection(text: str) -> dict:
@@ -153,6 +177,53 @@ def image_url(item: ResourceContent) -> str | None:
     return None
 
 
+# ---- Prices ------------------------------------------------------------------
+
+def mock_price_result(req: TrackItem) -> PriceResult:
+    """Stand-in for the price agent: about half of items show a 10% drop, the rest no change."""
+    item = store.get_item(req.item_id)
+    paid = item["price_paid"]
+    dropped = int(req.item_id[3:], 16) % 2 == 0
+    return PriceResult(item_id=req.item_id, ok=True,
+                       current_price=round(paid * 0.9, 2) if dropped else paid,
+                       checked_at=datetime.now(timezone.utc).isoformat())
+
+
+async def request_price(ctx: Context, req: TrackItem):
+    if PRICE_AGENT_ADDRESS:
+        await ctx.send(PRICE_AGENT_ADDRESS, req)
+        return
+    ctx.logger.info(f"no PRICE_AGENT_ADDRESS, mocking price for {req.item_id}")
+    await asyncio.sleep(2)  # feel like a real lookup
+    await show_price(ctx, mock_price_result(req), mock=True)
+
+
+async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
+    item = store.get_item(result.item_id)
+    if item is None:
+        ctx.logger.warning(f"price for unknown item {result.item_id}")
+        return
+    user = item["user_id"]
+    if not result.ok or not result.current_price or result.current_price <= 0:
+        ctx.logger.info(f"price check failed for {result.item_id}: {result.error}")
+        await ctx.send(user, reply("Couldn't get the current price for that item. Try again later."))
+        return
+    store.save_price(result.item_id, result.current_price,
+                     result.checked_at or datetime.now(timezone.utc).isoformat(), result.title or "")
+    item = store.get_item(result.item_id)
+    drop = item["price_paid"] - item["current_price"]
+    headline = f"Price dropped ${drop:.2f}!" if drop > 1 else "No price drop yet."
+    await ctx.send(user, card(headline, "detail", price_detail(item, mock)))
+
+
+@agent.on_message(model=PriceResult)
+async def on_price_result(ctx: Context, sender: str, msg: PriceResult):
+    if sender != PRICE_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring PriceResult from unexpected sender {sender}")
+        return
+    await show_price(ctx, msg)
+
+
 # ---- Handlers ----------------------------------------------------------------
 
 async def handle_text(ctx: Context, sender: str, text: str):
@@ -173,9 +244,8 @@ async def handle_text(ctx: Context, sender: str, text: str):
             await ctx.send(sender, reply("That item is already being tracked."))
             return
         ctx.logger.info(f"saved {item_id} ({shop}) for {sender}")
-        await ctx.send(sender, reply(
-            f"Tracking it: paid ${price:.2f} at {shop.title()}. "
-            "I'll check the live price once the price agent is connected."))
+        await ctx.send(sender, reply(f"Tracking it: paid ${price:.2f} at {shop.title()}. Checking price…"))
+        await request_price(ctx, TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop))
     elif action == "add_item":
         url = sel.get("product_url", "") if valid_url(sel.get("product_url", "")) else ""
         await ctx.send(sender, card(
