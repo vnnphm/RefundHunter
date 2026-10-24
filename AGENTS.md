@@ -267,7 +267,7 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5) and the ASI:One API docs on image input.
 
-**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Steps 3–5 are next.
+**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Step 3 is built in `parser_agent.py` (photos and email text; test with `uv run parser_agent.py --check <photo | link | email.txt>`). Steps 4–5 are next.
 
 **1. Tell ASI:One we accept attachments.** When a `StartSessionContent` arrives, reply with:
 ```python
@@ -305,7 +305,7 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 **Open question: can the parser download ASI:One's attachment URL?** Fetch's example only forwarded the URL to OpenAI; it never downloaded it, and ASI:One's storage may need auth or expire. Find out with the first real photo:
 - The parser logs the download's status code, `content-type` and size (never the URL).
 - `200` + `image/*` → done, use the steps above.
-- `401`/`403`/`404`, or HTML instead of an image → try sending the URL itself as `image_url` (no download). If ASI:One answers `400 unsupported_content_part` for that host too, we need another way to get the bytes; ask in the Fetch.ai hackathon channel before building more.
+- `401`/`403`/`404`, or HTML instead of an image → try sending the URL itself as `image_url` (no download). `parser_agent.py` does this automatically and logs "sending the link to asi1 instead". If ASI:One answers `400 unsupported_content_part` for that host too, we need another way to get the bytes; ask in the Fetch.ai hackathon channel before building more.
 
 **4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
 
