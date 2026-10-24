@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 import httpx
 from dotenv import load_dotenv
@@ -18,7 +19,6 @@ DATASETS = {
     "amazon": "gd_l7q7dkf244hwjntr0",   # Amazon products
     "walmart": "gd_l95fol7l1ru6rlo116",  # Walmart - products
 }
-SEARCH_DATASET = "gd_lwdb4vjm1ehb499uxs"  # Amazon products search, by keyword
 SEARCH_LIMIT = 3  # records are billed one credit each: ask for only what the carousel shows
 PRICE_FIELDS = ("final_price", "price", "initial_price")
 POLL_LIMIT_S = 180
@@ -144,22 +144,51 @@ async def on_track(ctx: Context, sender: str, req: TrackItem):
     await ctx.send(sender, result)
 
 
-async def find_products(query: str, client: httpx.AsyncClient | None = None) -> list[ProductMatch]:
-    """Search Amazon for a receipt item's name. Top matches, cached so tracking one is free."""
-    records = await scrape_records(
-        {"keyword": query[:80], "url": "https://www.amazon.com", "pages_to_search": 1},
-        SEARCH_DATASET, {"limit_per_input": SEARCH_LIMIT}, client)
+def _amazon_hit(rec: dict) -> tuple[str, int, bool] | None:
+    asin = rec.get("asin")
+    if not asin:
+        return None
+    return f"https://www.amazon.com/dp/{asin}", rec.get("rank_on_page") or 99, str(rec.get("sponsored")).lower() == "true"
+
+
+def _walmart_hit(rec: dict) -> tuple[str, int, bool] | None:
+    item = rec.get("us_item_id")
+    if not item:
+        return None
+    rank = rec.get("product_index") or rec.get("placement_on_page") or 99
+    return f"https://www.walmart.com/ip/{item}", rank, bool(rec.get("is_sponsored_flag"))
+
+
+# store -> (dataset, input for a name, record -> (product url, rank, sponsored))
+SEARCHES = {
+    "amazon": ("gd_lwdb4vjm1ehb499uxs",  # Amazon products search
+               lambda q: {"keyword": q, "url": "https://www.amazon.com", "pages_to_search": 1}, _amazon_hit),
+    "walmart": ("gd_m7khey0wb7wviejgj",  # Walmart products search, by search-page URL
+                lambda q: {"url": "https://www.walmart.com/search?" + urlencode({"q": q})}, _walmart_hit),
+}
+
+
+async def search_records(query: str, store: str, client: httpx.AsyncClient | None = None) -> list[dict]:
+    if store not in SEARCHES:
+        raise ScrapeError("search only works for Amazon and Walmart")
+    dataset_id, make_input, _ = SEARCHES[store]
+    query = query.strip().rstrip(".…").strip()[:80]  # a cut-off name ("Corrugated Sh...") searches badly
+    return await scrape_records(make_input(query), dataset_id, {"limit_per_input": SEARCH_LIMIT}, client)
+
+
+async def find_products(query: str, store: str = "amazon",
+                        client: httpx.AsyncClient | None = None) -> list[ProductMatch]:
+    """Search a store for a receipt item's name. Top matches, cached so tracking one is free."""
+    hits = []
+    for rec in await search_records(query, store, client):
+        hit, price = SEARCHES[store][2](rec), pick_price(rec)
+        if hit and price is not None and not hit[2]:
+            hits.append((hit[1], hit[0], price, rec))
     matches = []
-    for rec in sorted(records, key=lambda r: r.get("rank_on_page") or 99):
-        price, asin = pick_price(rec), rec.get("asin")
-        if not asin or price is None or str(rec.get("sponsored")).lower() == "true":
-            continue
-        url = f"https://www.amazon.com/dp/{asin}"
+    for _, url, price, rec in sorted(hits, key=lambda h: h[0])[:SEARCH_LIMIT]:
         name = rec.get("name") or rec.get("title") or ""
         _cache[url] = (time.time(), price, name)
         matches.append(ProductMatch(name=name, product_url=url, price=price, image_url=rec.get("image") or ""))
-        if len(matches) == SEARCH_LIMIT:
-            break
     return matches
 
 
@@ -167,10 +196,8 @@ async def find_products(query: str, client: httpx.AsyncClient | None = None) -> 
 async def on_find(ctx: Context, sender: str, req: FindProduct):
     start = time.monotonic()
     try:
-        if req.store != "amazon":
-            raise ScrapeError("search only works for Amazon")
         result = FindResult(item_id=req.item_id, user_id=req.user_id, ok=True,
-                            matches=await find_products(req.query))
+                            matches=await find_products(req.query, req.store))
     except ScrapeError as e:
         result = FindResult(item_id=req.item_id, user_id=req.user_id, ok=False, error=str(e))
     except Exception as e:  # never leave the coordinator waiting
@@ -182,19 +209,16 @@ async def on_find(ctx: Context, sender: str, req: FindProduct):
     await ctx.send(sender, result)
 
 
-async def search_once(query: str):
+async def search_once(query: str, store: str):
     """Manual test: one search, print what came back. Costs one credit per record."""
     try:
-        records = await scrape_records(
-            {"keyword": query[:80], "url": "https://www.amazon.com", "pages_to_search": 1},
-            SEARCH_DATASET, {"limit_per_input": SEARCH_LIMIT})
+        records = await search_records(query, store)
     except ScrapeError as e:
         print(f"failed: {e}")
         return
     print(f"{len(records)} record(s) delivered (limit asked: {SEARCH_LIMIT})")
     for rec in records[:10]:
-        print(f"  #{rec.get('rank_on_page')} sponsored={rec.get('sponsored')} ${pick_price(rec)} "
-              f"{rec.get('asin')} {(rec.get('name') or '')[:70]}")
+        print(f"  {SEARCHES[store][2](rec)} ${pick_price(rec)} {(rec.get('name') or '')[:70]}")
     if records:
         print("all keys:", sorted(records[0]))
 
@@ -213,8 +237,8 @@ async def check_once(url: str, store: str):
 
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "--search":
-        # uv run price_agent.py --search "<item name>"
-        asyncio.run(search_once(sys.argv[2]))
+        # uv run price_agent.py --search "<item name>" [amazon|walmart]
+        asyncio.run(search_once(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "amazon"))
     elif len(sys.argv) > 1 and sys.argv[1] == "--check":
         # uv run price_agent.py --check <url> [amazon|walmart]
         asyncio.run(check_once(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "amazon"))

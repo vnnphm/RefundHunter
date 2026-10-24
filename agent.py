@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -14,6 +15,7 @@ from uagents_core.contrib.protocols.chat import (
     ResourceContent, StartSessionContent, TextContent, chat_protocol_spec,
 )
 
+import gmail
 import store
 from models import FindProduct, FindResult, ParsedReceipt, PriceResult, Receipt, TrackItem
 
@@ -43,7 +45,7 @@ chat = Protocol(spec=chat_protocol_spec)
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 ITEM_ID_RE = re.compile(r"\bit_[0-9a-f]{8}\b")
 ACTION_RE = re.compile(r"\b(submit_item|add_item|upload_receipt|list_items|view_item|link_email"
-                       r"|check_receipts|track_receipt|dismiss_receipt)\b")
+                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt)\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -96,8 +98,8 @@ def menu_card(pending: int = 0) -> dict:
             {"type": "group", "direction": "row", "gap": 8, "children": [
                 {"type": "button", "label": "My items",
                  "action": {"selection": {"action": "list_items"}}},
-                {"type": "button", "label": "Link my email",
-                 "action": {"selection": {"action": "link_email"}}},
+                {"type": "button", "label": "Connect Gmail",
+                 "action": {"selection": {"action": "connect_gmail"}}},
             ]},
             *review,
         ],
@@ -205,18 +207,21 @@ def items_carousel(items: list[dict]) -> dict:
             "items": tiles}
 
 
-def match_carousel(item_id: str, name: str, price_paid: float, matches: list) -> dict:
-    """Amazon search results for a receipt item; tapping one tracks it like a filled-in form."""
+SEARCHABLE = ("amazon", "walmart")  # stores the price agent can search by item name
+
+
+def match_carousel(item_id: str, name: str, price_paid: float, matches: list, shop: str = "amazon") -> dict:
+    """Store search results for a receipt item; tapping one tracks it like a filled-in form."""
     tiles = []
     for m in matches:
         if m.price and price_paid - m.price > 1:
             badge = {"label": f"${price_paid - m.price:.2f} less now", "variant": "success"}
         else:
-            badge = {"label": "Amazon", "variant": "info"}
+            badge = {"label": shop.title(), "variant": "info"}
         tiles.append({
             "id": m.product_url.rsplit("/", 1)[-1],
             "title": m.name[:80],
-            "subtitle": m.product_url.rsplit("/", 1)[-1],  # the ASIN, to tell look-alikes apart
+            "subtitle": m.product_url.rsplit("/", 1)[-1],  # ASIN / Walmart item id, to tell look-alikes apart
             "badges": [badge],
             "secondary_text": f"Now ${m.price:.2f}" if m.price else "Price unknown",
             "primary_cta": {"label": "This one", "selection": {
@@ -257,6 +262,8 @@ def parse_selection(text: str) -> dict:
         sel["action"] = "submit_item"
     elif "link" in lower and ("email" in lower or "email" in sel):
         sel["action"] = "link_email"
+    elif re.search(r"\b(gmail|connect)\b", lower):
+        sel["action"] = "connect_gmail"
     elif re.search(r"\brec(ei|ie)pts\b", lower):  # "any new receipts?" (or "reciepts")
         sel["action"] = "check_receipts"
     elif re.search(r"\b(approved?|confirm(ed)?|track(ing)? (these|this|them|it))\b", lower) and re.search(r"rec(ei|ie)pt", lower):
@@ -373,6 +380,10 @@ def mock_parse(r: Receipt) -> ParsedReceipt:
                                  "product_url": url}])
 
 
+_gmail_card_at: dict[str, float] = {}  # user -> when a Gmail import last pushed a review card
+GMAIL_BURST_S = 120  # ASI:One rate-limits (429) a burst of cards; the rest wait as pending
+
+
 async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
     user = parsed.user_id
     items = [{"name": it.name, "price_paid": it.price_paid, "product_url": it.product_url}
@@ -387,8 +398,14 @@ async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
         ctx.logger.info(f"receipt {parsed.message_id} already seen")
         return
     ctx.logger.info(f"receipt {parsed.message_id}: {len(items)} item(s) for {user}")
-    await ctx.send(user, card("I found a new receipt. Want me to track it?", "review",
-                              receipt_review(store.get_receipt(parsed.message_id), mock)))
+    text = "I found a new receipt. Want me to track it?"
+    if parsed.message_id.startswith("gm_"):  # Gmail connect imports several at once: one card, rest pending
+        if time.time() - _gmail_card_at.get(user, 0) < GMAIL_BURST_S:
+            ctx.logger.info(f"receipt {parsed.message_id} saved as pending (Gmail import)")
+            return
+        _gmail_card_at[user] = time.time()
+        text = "I found a receipt in your Gmail. Want me to track it? (Ask \"any new receipts?\" for the rest.)"
+    await ctx.send(user, card(text, "review", receipt_review(store.get_receipt(parsed.message_id), mock)))
 
 
 @agent.on_message(model=Receipt)
@@ -397,7 +414,11 @@ async def on_receipt(ctx: Context, sender: str, msg: Receipt):
     if not SERVER_ADDRESS or sender != SERVER_ADDRESS:
         ctx.logger.warning(f"ignoring Receipt from unexpected sender {sender}")
         return
-    user = store.user_for_email(msg.sender)
+    if msg.user_id:  # Gmail connect: the user signed in from our link, so we know whose it is
+        user = msg.user_id
+        store.link_email(msg.sender, user)  # later forwards from this address work too
+    else:
+        user = store.user_for_email(msg.sender)
     if user is None:
         ctx.logger.info(f"receipt {msg.message_id} from an unlinked email (@{msg.sender.split('@')[-1]})")
         return
@@ -428,16 +449,16 @@ async def on_find_result(ctx: Context, sender: str, msg: FindResult):
         ctx.logger.info(f"search {msg.item_id} already handled")
         return
     ctx.storage.remove(f"find:{msg.item_id}")
-    name, paid = wanted["name"], wanted["price_paid"]
+    name, paid, shop = wanted["name"], wanted["price_paid"], wanted.get("store", "amazon")
     form = add_item_form(msg.item_id, "", paid, name)
     if msg.ok and msg.matches:
         ctx.logger.info(f"search {msg.item_id}: {len(msg.matches)} match(es) for {msg.user_id}")
         await ctx.send(msg.user_id, card(f"Which one did you buy? You paid ${paid:.2f}.", "carousel",
-                                         match_carousel(msg.item_id, name, paid, msg.matches)))
+                                         match_carousel(msg.item_id, name, paid, msg.matches, shop)))
         await ctx.send(msg.user_id, card("Not listed? Paste the link.", "form", form))
     else:
         ctx.logger.info(f"search {msg.item_id} found nothing: {msg.error or 'no matches'}")
-        await ctx.send(msg.user_id, card(f"I couldn't find {name[:60]} on Amazon. What's the link?",
+        await ctx.send(msg.user_id, card(f"I couldn't find {name[:60]} on {shop.title()}. What's the link?",
                                          "form", form))
 
 
@@ -447,7 +468,17 @@ def find_receipt(sender: str, sel: dict, text: str) -> dict | None:
     if rec and rec["user_id"] == sender:
         return rec
     pending = store.pending_receipts(sender)
-    return next((r for r in pending if r["message_id"] in text), pending[0] if pending else None)
+    named = next((r for r in pending if r["message_id"] in text), None)
+    # Planner prose often drops the id: guess only when one receipt is waiting, never pick among several.
+    return named or (pending[0] if len(pending) == 1 else None)
+
+
+async def show_pending(ctx: Context, sender: str, intro: str = "Want me to track this?"):
+    pending = store.pending_receipts(sender)
+    if not pending:
+        await ctx.send(sender, reply("No new receipts right now."))
+    for rec in pending[:3]:
+        await ctx.send(sender, card(intro, "review", receipt_review(rec, mock=not PARSER_AGENT_ADDRESS)))
 
 
 # ---- Handlers ----------------------------------------------------------------
@@ -489,16 +520,22 @@ async def handle_text(ctx: Context, sender: str, text: str):
         where = (f"Forward order emails from {email} to {RECEIPT_INBOX} and I'll pick them up."
                  if RECEIPT_INBOX else "Email forwarding isn't set up yet; check back soon.")
         await ctx.send(sender, reply(f"Linked {email}. {where}"))
-    elif action == "check_receipts":
-        pending = store.pending_receipts(sender)
-        if not pending:
-            await ctx.send(sender, reply("No new receipts right now."))
+    elif action == "connect_gmail":
+        if not gmail.configured():
+            await ctx.send(sender, reply("Gmail connect isn't set up yet. You can upload a receipt photo instead."))
             return
-        for rec in pending[:3]:
-            await ctx.send(sender, card("Want me to track this?", "review",
-                                        receipt_review(rec, mock=not PARSER_AGENT_ADDRESS)))
+        ctx.logger.info(f"sent a Gmail connect link to {sender}")
+        await ctx.send(sender, reply(
+            f"Connect Gmail here: {gmail.connect_link(sender)}\n\n"
+            "I'll read order emails from the last 30 days once (read-only), show each receipt here for you "
+            "to review, and keep nothing else from your inbox. The link works for 15 minutes."))
+    elif action == "check_receipts":
+        await show_pending(ctx, sender)
     elif action == "track_receipt":
         rec = find_receipt(sender, sel, text)
+        if rec is None and store.pending_receipts(sender):
+            await show_pending(ctx, sender, "Which receipt? Tap Approve on the one you mean.")
+            return
         if rec is None or rec["status"] != "pending":
             await ctx.send(sender, reply("I don't have a receipt waiting for you to confirm."))
             return
@@ -506,17 +543,21 @@ async def handle_text(ctx: Context, sender: str, text: str):
         for it in rec["items"]:
             if valid_url(it["product_url"]):
                 await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"])
-            elif rec["store"] == "amazon" and PRICE_AGENT_ADDRESS:  # search for it, user picks
+            elif rec["store"] in SEARCHABLE and PRICE_AGENT_ADDRESS:  # search for it, user picks
                 item_id = new_item_id()
-                ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"]})
-                await ctx.send(sender, reply(f"Looking up {it['name'][:60]} on Amazon…"))
+                ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"],
+                                                    "store": rec["store"]})
+                await ctx.send(sender, reply(f"Looking up {it['name'][:60]} on {rec['store'].title()}…"))
                 await ctx.send(PRICE_AGENT_ADDRESS, FindProduct(item_id=item_id, user_id=sender,
-                                                                query=it["name"]))
+                                                                query=it["name"], store=rec["store"]))
             else:  # paper receipts and some emails have no product link
                 await ctx.send(sender, card(f"What's the product link for {it['name'][:60]}?", "form",
                                             add_item_form(new_item_id(), "", it["price_paid"], it["name"])))
     elif action == "dismiss_receipt":
         rec = find_receipt(sender, sel, text)
+        if rec is None and store.pending_receipts(sender):
+            await show_pending(ctx, sender, "Which receipt? Tap Not now on the one you mean.")
+            return
         if rec and rec["status"] == "pending":
             store.set_receipt_status(rec["message_id"], "dismissed")
         await ctx.send(sender, reply("Okay, I won't track that receipt."))

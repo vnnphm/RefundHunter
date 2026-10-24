@@ -19,18 +19,20 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Agent | File | Phase | Job | Receives | Sends |
 | --- | --- | --- | --- | --- | --- |
 | Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
-| Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data; searches Amazon for receipt items without a link | `TrackItem`, `FindProduct` | `PriceResult`, `FindResult` |
+| Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data; searches Amazon or Walmart for receipt items without a link | `TrackItem`, `FindProduct` | `PriceResult`, `FindResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
 | Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
 
-Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI webhook), Pipedream, Bright Data.
+Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: email webhook + Gmail connect), `gmail.py` (Google OAuth + Gmail API), Pipedream, Bright Data.
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
-**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow. An Amazon item without a link → `FindProduct` → price agent searches → `FindResult` → carousel → user picks one → Phase 1 flow.
+**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow. An Amazon or Walmart item without a link → `FindProduct` → price agent searches → `FindResult` → carousel → user picks one → Phase 1 flow.
 
 **Flow (Phase 2, email):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
+
+**Flow (Phase 2, Gmail connect):** menu → **Connect Gmail** → signed link → Google sign-in → `server.py` reads up to 10 recent order emails once, revokes the token → `Receipt(user_id=<from the link>)` each → coordinator → parser agent → same as above.
 
 ## Who owns what (2 people)
 
@@ -127,7 +129,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`, and for Gmail connect: `PUBLIC_URL`, `OAUTH_STATE_SECRET` (both: coordinator and server), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (server). No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
 - **Ports:** coordinator 8001, price agent 8002, parser agent 8003, email webhook (`server.py`) 8000.
 
@@ -187,7 +189,7 @@ Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Base
 **Built:** Path A for Amazon and Walmart in `price_agent.py`. `store: "other"` replies `ok=False, error="store not supported yet"` until C is added. Dataset ids come from [scrapers.json](https://docs.brightdata.com/scrapers.json).
 Test one link without starting the agent (costs one credit): `uv run price_agent.py --check <url> [amazon|walmart]`.
 
-**Search (receipt items without a link):** Amazon products search `gd_lwdb4vjm1ehb499uxs`, input `{"keyword", "url": "https://www.amazon.com", "pages_to_search": 1}` with `limit_per_input=3` (honoured: 3 records = 3 credits, ~7 s). Fields: `asin`, `name`, `final_price`, `image`, `sponsored`, `rank_on_page`. Sponsored and priceless results are skipped; URLs become `https://www.amazon.com/dp/<asin>`, and their prices go into the 10-minute cache, so tracking a pick costs nothing. No Walmart search scraper is listed, so Walmart items still get the link form. Test: `uv run price_agent.py --search "<item name>"` (3 credits).
+**Search (receipt items without a link):** Amazon products search `gd_lwdb4vjm1ehb499uxs`, input `{"keyword", "url": "https://www.amazon.com", "pages_to_search": 1}` with `limit_per_input=3` (honoured: 3 records = 3 credits, ~7 s). Fields: `asin`, `name`, `final_price`, `image`, `sponsored`, `rank_on_page`. Sponsored and priceless results are skipped; URLs become `https://www.amazon.com/dp/<asin>`, and their prices go into the 10-minute cache, so tracking a pick costs nothing. Walmart: products search `gd_m7khey0wb7wviejgj`, input `{"url": "https://www.walmart.com/search?q=<name>"}`, same limit (~50 s; names may come back in Spanish, the receipt keeps its own). Fields: `us_item_id`, `name`, `price`, `is_sponsored_flag`, `product_index`; links become `https://www.walmart.com/ip/<us_item_id>`, which the Walmart product scraper accepts (`final_price` confirmed). Walmart's emails have no product links at all (the item picture is a bare `<img>` with the name as alt text), so search is how Walmart items get one. Other stores get the link form. Test: `uv run price_agent.py --search "<item name>" [amazon|walmart]` (≤3 credits).
 
 **Auth and budget**
 - One API key. REST: `Authorization: Bearer <BRIGHTDATA_API_TOKEN>`. MCP: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`.
@@ -332,7 +334,7 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 **4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
 
-**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`: on an Amazon receipt, the coordinator sends `FindProduct` and shows the top 3 Amazon matches in a `carousel` (each tile's button is a filled-in `submit_item`), then a link form for "not listed". The user picks, because one name matches several variants (sizes, kits). Other stores, or no matches, get the link form.
+**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`: on an Amazon or Walmart receipt, the coordinator sends `FindProduct` and shows the top 3 matches from that store in a `carousel` (each tile's button is a filled-in `submit_item`), then a link form for "not listed". The user picks, because one name matches several variants (sizes, kits). Other stores, or no matches, get the link form.
 
 **Rules**
 - Only use the photo to read the receipt; don't store the image or its bytes. Keep only the parsed fields.
@@ -340,9 +342,14 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 ## Email receipts (Phase 2)
 
-Owner: Person A. Users set up a Gmail filter once that auto-forwards order emails to one shared inbox (or forward by hand); the coordinator matches the user's address to a linked ASI:One user. No Gmail OAuth: Testing mode works without Google's review, but a push inbox is instant and stores no tokens.
+Owner: Person A. Users set up a Gmail filter once that auto-forwards order emails to one shared inbox (or forward by hand); the coordinator matches the user's address to a linked ASI:One user. Or they tap **Connect Gmail** (below), which reads recent orders once with no forwarding setup.
 
-**Linking.** Menu → **Link my email** (or "link my email you@x.com") → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
+**Gmail connect (OAuth).** Import on connect, keep nothing. Menu → **Connect Gmail** → the coordinator replies with `{PUBLIC_URL}/oauth/start?state=…` (cards can't open links, so it's in the text). The `state` is the user's ASI:One address + time, HMAC-signed with `OAUTH_STATE_SECRET`, valid 15 minutes (`gmail.sign_state`/`check_state`). `/oauth/start` → Google consent (`gmail.readonly`, `access_type=online`: no refresh token) → `/oauth/callback` swaps the code for a token, reads the Gmail address and up to 10 messages matching `gmail.QUERY` (last 30 days, purchases/order/receipt, no shipping updates, no Amazon since its emails don't list items), revokes the token, and sends each as `Receipt(message_id="gm_"+id, user_id=<from state>, sender=<gmail>)`. The coordinator trusts `user_id` only from `SERVER_ADDRESS` and links that Gmail address, so later forwards work too.
+- Google Cloud Console: enable the **Gmail API**; Google Auth Platform → Branding (app name, support email), Audience **External, left in Testing** with test users added (max 100; they see "Google hasn't verified this app" → Advanced → Continue), Data access: `…/auth/gmail.readonly`; Clients → **Web application** with redirect URIs `https://<server URL>/oauth/callback` and `http://localhost:8000/oauth/callback`.
+- Only test users can sign in, so add judges' Gmail addresses before they try it.
+- Never log the token, the code, bodies or full addresses (count and domain only).
+
+**Linking** (for forwarding). Type "link my email you@x.com" (Gmail connect links automatically) → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
 
 **Pipedream** (only the code step below lives outside the repo)
 1. New workflow, trigger **Email** ("New Email Received"; instant, not polled). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
