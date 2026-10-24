@@ -358,7 +358,8 @@ async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
              for it in parsed.items if it.price_paid > 0] if parsed.ok else []
     if not items:
         ctx.logger.info(f"receipt {parsed.message_id} unreadable: {parsed.error or 'no priced items'}")
-        await ctx.send(user, reply("I got a receipt but couldn't read the items on it. You can add them by hand."))
+        if parsed.message_id.startswith("photo_"):  # emails arrive via a filter: stay quiet on non-receipts
+            await ctx.send(user, reply("I got a receipt but couldn't read the items on it. You can add them by hand."))
         return
     if not store.save_receipt(parsed.message_id, user, parsed.store, parsed.purchase_date,
                               parsed.order_number, items):
