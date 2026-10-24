@@ -1,0 +1,62 @@
+name: RefundHunter Policy Fix and Test
+
+on:
+  push:
+    branches:
+      - copilot/add-policy-agent
+    paths:
+      - ".github/workflows/policy-check.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: copilot/add-policy-agent
+          persist-credentials: true
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Apply original fixes
+        run: python apply_refundhunter_pr10_fix.py
+
+      - name: Test original fixes
+        run: python test_refundhunter_pr10_fix.py
+
+      - name: Integrate Bright Data
+        run: python upgrade_policy_brightdata.py
+
+      - name: Test policy evidence
+        run: python -m unittest -v test_policy_evidence.py
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile \
+            agent.py \
+            models.py \
+            store.py \
+            policy_agent.py \
+            policy_evidence.py
+
+      - name: Review changed files
+        run: git diff --stat
+
+      - name: Commit fixes to feature branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add agent.py models.py store.py \
+            policy_agent.py policy_evidence.py pyproject.toml
+          if ! git diff --cached --quiet; then
+            git commit -m "Integrate Bright Data policy fixes"
+            git push origin HEAD:copilot/add-policy-agent
+          fi
