@@ -56,6 +56,7 @@ def relay(name: str, proc: subprocess.Popen):
 
 
 def main():
+    sys.stdout.reconfigure(errors="replace")  # an odd character in a log line never stops the relay
     env = prepare_env()
     missing = [k for k in KEYS if not (env.get(k) or os.getenv(k))]
     if missing:
@@ -73,7 +74,10 @@ def main():
             if name == "coordinator":
                 time.sleep(3)  # let the workers come up first
             proc = subprocess.Popen([sys.executable, "-u", script], stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, cwd=ENV.parent)
+                                    stderr=subprocess.STDOUT, cwd=ENV.parent,
+                                    # UTF-8 both ways: Windows pipes default to the local code page
+                                    encoding="utf-8", errors="replace",
+                                    env={**os.environ, "PYTHONIOENCODING": "utf-8"})
             procs.append((name, proc))
             threading.Thread(target=relay, args=(name, proc), daemon=True).start()
         while True:
