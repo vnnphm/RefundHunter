@@ -15,6 +15,14 @@ from models import FindProduct, FindResult, PriceResult, ProductMatch, TrackItem
 
 load_dotenv()
 
+# Only our coordinator may use this agent: anyone on Agentverse can message it, and each request costs
+# Bright Data credits. Empty = answer everyone (local testing).
+COORDINATOR_ADDRESS = os.getenv("COORDINATOR_ADDRESS", "").strip()
+
+
+def allowed(sender: str) -> bool:
+    return not COORDINATOR_ADDRESS or sender == COORDINATOR_ADDRESS
+
 BD_API = "https://api.brightdata.com/datasets/v3"
 # Bright Data scrapers, collect by URL (from docs.brightdata.com/scrapers.json)
 DATASETS = {
@@ -154,6 +162,10 @@ _slots = asyncio.Semaphore(MAX_JOBS)
 
 @agent.on_message(model=TrackItem, replies=PriceResult)
 async def on_track(ctx: Context, sender: str, req: TrackItem):
+    if not allowed(sender):
+        ctx.logger.warning(f"refusing TrackItem from {sender}: not our coordinator")
+        await ctx.send(sender, PriceResult(item_id=req.item_id, ok=False, error="not allowed"))
+        return
     ctx.logger.info(f"price {req.item_id} [{req.store}] started")
     async with _slots:
         await answer_track(ctx, sender, req)
@@ -236,6 +248,10 @@ async def find_products(query: str, store: str = "amazon",
 
 @agent.on_message(model=FindProduct, replies=FindResult)
 async def on_find(ctx: Context, sender: str, req: FindProduct):
+    if not allowed(sender):
+        ctx.logger.warning(f"refusing FindProduct from {sender}: not our coordinator")
+        await ctx.send(sender, FindResult(item_id=req.item_id, user_id=req.user_id, ok=False, error="not allowed"))
+        return
     ctx.logger.info(f"search {req.item_id} [{req.store}] started")
     async with _slots:
         await answer_find(ctx, sender, req)
