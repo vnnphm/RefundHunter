@@ -12,6 +12,8 @@ Finds money you're owed on things you already bought.
 
 ## Try it
 
+Start every message with **@refundhunter** (or tap a card's buttons); plain messages without it are ignored.
+
 - `@refundhunter hi`
 - `@refundhunter connect my gmail`
 - `@refundhunter any new receipts?`

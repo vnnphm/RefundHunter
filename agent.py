@@ -8,12 +8,15 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
 from dotenv import load_dotenv
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement, ChatMessage, EndSessionContent, MetadataContent,
     ResourceContent, StartSessionContent, TextContent, chat_protocol_spec,
 )
+
+from uagents_core.types import DeliveryStatus
 
 import gmail
 import store
@@ -54,7 +57,7 @@ chat = Protocol(spec=chat_protocol_spec)
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 ITEM_ID_RE = re.compile(r"\bit_[0-9a-f]{8}\b")
 ACTION_RE = re.compile(r"\b(submit_item|add_item|upload_receipt|list_items|view_item|link_email"
-                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt|draft_claim|recheck_item|check_prices)\b")
+                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt|draft_claim|recheck_item|check_prices|show_matches)\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -86,21 +89,46 @@ def accepts_attachments() -> ChatMessage:
 # ---- Cards -------------------------------------------------------------------
 
 _next_send: dict[str, float] = {}  # user -> earliest time (monotonic) for their next message
-SEND_GAP_S = 1.5  # ASI:One answers 429 to messages sent back-to-back, and drops them
+SEND_GAP_S = 2.5  # ASI:One answers 429 to messages sent close together, and uagents then drops them
+RETRY_WAITS_S = (3, 6, 12)  # after a 429: wait, then try again (about 21 s at most)
 
 
 async def say(ctx: Context, user: str, msg: ChatMessage):
-    """Send a chat message to a user, spaced out so ASI:One doesn't rate-limit it."""
+    """Send a chat message to a user, spaced out, and retried if ASI:One rate-limits it."""
     now = time.monotonic()
     slot = max(now, _next_send.get(user, 0))
     _next_send[user] = slot + SEND_GAP_S
     if slot > now:
         await asyncio.sleep(slot - now)
-    await ctx.send(user, msg)
+    for wait in (*RETRY_WAITS_S, None):
+        status = await ctx.send(user, msg)
+        if getattr(status, "status", None) != DeliveryStatus.FAILED:
+            return
+        if wait is None or "429" not in str(getattr(status, "detail", "")):
+            ctx.logger.warning(f"message to {user} not delivered: {str(getattr(status, 'detail', ''))[:80]}")
+            return
+        ctx.logger.info(f"ASI:One rate-limited a message to {user}; retrying in {wait}s")
+        _next_send[user] = max(_next_send.get(user, 0), time.monotonic() + wait + SEND_GAP_S)
+        await asyncio.sleep(wait)
 
 
 def new_item_id() -> str:
     return "it_" + uuid4().hex[:8]
+
+
+def waiting_card(item_id: str, name: str, shop: str) -> dict:
+    """Sent in the user's own turn: a result that arrives a minute later can be taken by their ASI:One
+    assistant instead of shown, so the matches wait here until the user asks for them."""
+    return {"root": {
+        "type": "section",
+        "title": f"Looking up {name[:60]} on {shop or 'the store'}",
+        "subtitle": "Store searches can take a minute or two",
+        "children": [
+            {"type": "text", "value": "Tap Show matches in a minute to pick the right listing."},
+            {"type": "button", "label": "Show matches", "primary": True,
+             "action": {"selection": {"action": "show_matches", "item_id": item_id}}},
+        ],
+    }}
 
 
 def menu_card(pending: int = 0) -> dict:
@@ -291,6 +319,8 @@ def parse_selection(text: str) -> dict:
         sel["action"] = named.group(1)
     elif re.search(r"\b(draft|claim|refund request)", lower):  # before submit_item: it may quote a price
         sel["action"] = "draft_claim"
+    elif re.search(r"\bshow (me )?(the )?matches\b", lower):
+        sel["action"] = "show_matches"
     elif re.search(r"\b(check|update|refresh)\w* (all |my |the )*prices?\b|\b(check again|re-?check)\b", lower):
         sel["action"] = "recheck_item" if "item_id" in sel else "check_prices"
     elif "item_id" in sel and "price_paid" in sel:
@@ -413,6 +443,11 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
             headline = (f"Good news: {item['name'] or 'an item you bought'} dropped ${drop:.2f} below what you paid!"
                         if quiet["by"] == "watch" else f"Price dropped ${drop:.2f}!")
             ctx.logger.info(f"{quiet['by']} re-check {item['item_id']}: drop ${drop:.2f}, telling {user}")
+            if quiet["by"] == "watch":  # ASI:One may hand this to the user's assistant; ntfy reaches the phone
+                await push_phone(ctx, f"{item['name'] or 'An item you bought'} dropped ${drop:.2f}",
+                                 f"Now ${item['current_price']:.2f} at {shop_name(item['store']) or 'the store'}, "
+                                 f"you paid ${item['price_paid']:.2f}. Open ASI:One and say "
+                                 f"\"@refundhunter show my items\" to claim it.")
             await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
             await ask_policy(ctx, item)
         await batch_done(ctx, quiet, dropped=tell)
@@ -424,6 +459,26 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
 
 
 # ---- Re-checking prices: "Check again", "check my prices", and the price watch ----
+
+# Phone push for price-watch alerts via ntfy.sh (free; the ntfy app subscribes to this topic). The topic name
+# is the only access control, so it's a long random string kept in .env. Only the item name and amounts are sent.
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+
+
+async def push_phone(ctx: Context, title: str, message: str):
+    """Best effort: a failed push is logged and never stops the chat message."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # JSON to the server root (not headers) so any product name, dashes and all, comes through intact.
+            r = await client.post(NTFY_SERVER, json={"topic": NTFY_TOPIC, "title": title[:120], "message": message,
+                                                     "tags": ["moneybag"], "priority": 4})
+        ctx.logger.info(f"phone push {'sent' if r.status_code < 300 else f'failed ({r.status_code})'}")
+    except httpx.HTTPError as e:
+        ctx.logger.warning(f"phone push failed: {type(e).__name__}")  # never the topic: it's the access key
+
 
 WATCH_HOURS = float(os.getenv("PRICE_WATCH_HOURS", "6") or 0)  # re-check items older than this; 0 = off
 WATCH_TICK_S = 600  # how often the watch looks for items due
@@ -535,6 +590,9 @@ def mock_parse(r: Receipt) -> ParsedReceipt:
 
 _gmail_card_at: dict[str, float] = {}  # user -> when a Gmail import last pushed a review card
 GMAIL_BURST_S = 120  # ASI:One rate-limits (429) a burst of cards; the rest wait as pending
+# Off by default: a card that arrives right after the Google sign-in lands outside the user's turn, where their
+# ASI:One assistant takes it and starts talking ("I don't have access to any Gmail…"). 1 = send the first card.
+GMAIL_PUSH_CARD = os.getenv("GMAIL_PUSH_CARD", "0") == "1"
 
 
 async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
@@ -553,6 +611,9 @@ async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
     ctx.logger.info(f"receipt {parsed.message_id}: {len(items)} item(s) for {user}")
     text = "I found a new receipt. Want me to track it?"
     if parsed.message_id.startswith("gm_"):  # Gmail connect imports several at once: one card, rest pending
+        if not GMAIL_PUSH_CARD:  # quiet import: the user asks "@refundhunter any new receipts?" in their own turn
+            ctx.logger.info(f"receipt {parsed.message_id} saved as pending (Gmail import)")
+            return
         if time.time() - _gmail_card_at.get(user, 0) < GMAIL_BURST_S:
             ctx.logger.info(f"receipt {parsed.message_id} saved as pending (Gmail import)")
             return
@@ -604,10 +665,10 @@ async def on_find_result(ctx: Context, sender: str, msg: FindResult):
     if wanted is None:
         ctx.logger.info(f"search {msg.item_id} already handled")
         return
-    if not wanted.get("approved", True):  # searched early: hold the matches until the user approves
+    if not wanted.get("approved", True):  # hold the matches until the user approves or taps Show matches
         wanted.update(done=True, ok=msg.ok, error=msg.error, matches=[m.dict() for m in msg.matches])
         ctx.storage.set(key, wanted)
-        ctx.logger.info(f"search {msg.item_id} ready before approve: {len(msg.matches)} match(es)")
+        ctx.logger.info(f"search {msg.item_id} ready: {len(msg.matches)} match(es), waiting for the user")
         return
     ctx.storage.remove(key)
     await show_matches(ctx, msg.user_id, msg.item_id, wanted, msg.ok, msg.matches, msg.error)
@@ -635,7 +696,7 @@ def searchable(rec: dict, it: dict) -> bool:
 
 async def start_search(ctx: Context, user: str, it: dict, shop: str, approved: bool, receipt: str = "") -> str:
     item_id = new_item_id()
-    ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"],
+    ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"], "user": user,
                                         "store": shop, "approved": approved, "receipt": receipt})
     await ctx.send(PRICE_AGENT_ADDRESS, FindProduct(item_id=item_id, user_id=user, query=it["name"], store=shop))
     return item_id
@@ -751,7 +812,57 @@ async def track_new_item(ctx: Context, sender: str, url: str, price: float, name
     await request_price(ctx, TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop))
 
 
+# ASI:One's planner relays messages as plain text when the user doesn't @mention us, and it sometimes
+# answers our own status messages ("Hold up, I'm not looking anything up!"), which can loop bot-to-bot.
+BOT_CHATTER = re.compile(r"^\W*(hold (up|on)\b|i'?m not\b|i am not\b|i (do not|don'?t) have\b|as an ai\b|"
+                         r"i can'?t\b|i cannot\b|i didn'?t\b|i haven'?t\b|still (a hard )?no\b|nothing has changed|"
+                         r"(hey|hi)( there)?\W+just to clear)|\bi'?m an ai\b|\bas an ai\b|\bjust to clear things up\b", re.I)
+PROSE_WINDOW_S = 120
+PROSE_MAX = 3  # plain-text messages per window without a click or @mention before we stop answering
+_prose_at: dict[str, list[float]] = {}
+
+
+def is_direct(text: str) -> bool:
+    """A card click (JSON) or an @mention: the user, not the planner talking."""
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            if isinstance(json.loads(text[start:end + 1]), dict):
+                return True
+        except ValueError:
+            pass
+    return text.lstrip().startswith("@")
+
+
+# Users reach us with an @mention or a card tap; plain text is nearly always the user's own ASI:One assistant
+# reacting to our messages ("Pump the brakes!"), and answering it loops. Set ANSWER_PLAIN_TEXT=1 to answer
+# plain text again (filtered by the rules below).
+ANSWER_PLAIN_TEXT = os.getenv("ANSWER_PLAIN_TEXT", "0") == "1"
+
+
+def planner_loop(ctx: Context, sender: str, text: str) -> bool:
+    """True if this message should be ignored: plain text (by default), bot chatter, or a run of it."""
+    if is_direct(text):
+        _prose_at.pop(sender, None)
+        return False
+    if not ANSWER_PLAIN_TEXT:
+        ctx.logger.info(f"ignoring plain text from {sender} (not a card tap or @mention)")
+        return True
+    if BOT_CHATTER.search(text):
+        ctx.logger.info(f"ignoring planner chatter from {sender}")
+        return True
+    now = time.monotonic()
+    recent = [t for t in _prose_at.get(sender, []) if now - t < PROSE_WINDOW_S]
+    if len(recent) >= PROSE_MAX:
+        ctx.logger.info(f"ignoring plain text from {sender}: {len(recent)} in {PROSE_WINDOW_S}s with no click or @mention")
+        return True
+    _prose_at[sender] = recent + [now]
+    return False
+
+
 async def handle_text(ctx: Context, sender: str, text: str):
+    if planner_loop(ctx, sender, text):
+        return
     sel = parse_selection(text)
     action = sel.get("action")
 
@@ -779,14 +890,17 @@ async def handle_text(ctx: Context, sender: str, text: str):
                  if RECEIPT_INBOX else "Email forwarding isn't set up yet; check back soon.")
         await say(ctx, sender, reply(f"Linked {email}. {where}"))
     elif action == "connect_gmail":
+        if not is_direct(text):  # an assistant mentioning Gmail isn't a request, and it calls the link phishing
+            ctx.logger.info(f"ignoring a plain-text Gmail mention from {sender}")
+            return
         if not gmail.configured():
             await say(ctx, sender, reply("Gmail connect isn't set up yet. You can upload a receipt photo instead."))
             return
         ctx.logger.info(f"sent a Gmail connect link to {sender}")
         await say(ctx, sender, reply(
             f"Connect Gmail here: {gmail.connect_link(sender)}\n\n"
-            "I'll read order emails from the last 30 days once (read-only), show each receipt here for you "
-            "to review, and keep nothing else from your inbox. The link works for 15 minutes."))
+            "I'll read order emails from the last 30 days once (read-only) and keep nothing else from your inbox. "
+            "When you're back, send \"@refundhunter any new receipts?\" to review them. The link works for 15 minutes."))
     elif action == "check_receipts":
         await show_pending(ctx, sender)
     elif action == "track_receipt":
@@ -815,13 +929,13 @@ async def handle_text(ctx: Context, sender: str, text: str):
                     ctx.storage.remove(f"find:{item_id}")
                     await show_matches(ctx, sender, item_id, wanted, wanted["ok"],
                                        [ProductMatch(**m) for m in wanted["matches"]], wanted.get("error"))
-                elif wanted:  # still running: show the matches when they arrive
-                    wanted["approved"] = True
-                    ctx.storage.set(f"find:{item_id}", wanted)
-                    await say(ctx, sender, reply(f"Still looking up {it['name'][:60]} on {shop}…"))
-                else:
-                    await say(ctx, sender, reply(f"Looking up {it['name'][:60]} on {shop}…"))
-                    await start_search(ctx, sender, it, rec["store"], approved=True, receipt=rec["message_id"])
+                else:  # still running (or not started): the user pulls the matches with Show matches
+                    if not wanted:
+                        item_id = await start_search(ctx, sender, it, rec["store"], approved=False,
+                                                     receipt=rec["message_id"])
+                    ctx.storage.set(f"waiting:{sender}", item_id)
+                    await say(ctx, sender, card(f"Still looking up {it['name'][:60]} on {shop}…", "custom",
+                                                waiting_card(item_id, it["name"], shop)))
             else:  # paper receipts and some emails have no product link
                 await say(ctx, sender, card(f"What's the product link for {it['name'][:60]}?", "form",
                                             add_item_form(new_item_id(), "", it["price_paid"], it["name"],
@@ -847,6 +961,21 @@ async def handle_text(ctx: Context, sender: str, text: str):
                                         menu_card(len(store.pending_receipts(sender)))))
             return
         await say(ctx, sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
+    elif action == "show_matches":
+        item_id = sel.get("item_id", "")
+        if not item_id:  # prose: the user's latest "Show matches" card
+            item_id = ctx.storage.get(f"waiting:{sender}") or ""
+        wanted = ctx.storage.get(f"find:{item_id}") if item_id else None
+        if wanted is None or wanted.get("user", sender) != sender:
+            await say(ctx, sender, reply("I don't have matches waiting for that one. Say \"any new receipts?\" to see your receipts."))
+        elif not wanted.get("done"):
+            shop = shop_name(wanted.get("store", ""))
+            await say(ctx, sender, card(f"Still searching {shop or 'the store'}, try again in a few seconds.",
+                                        "custom", waiting_card(item_id, wanted["name"], shop)))
+        else:
+            ctx.storage.remove(f"find:{item_id}")
+            await show_matches(ctx, sender, item_id, wanted, wanted["ok"],
+                               [ProductMatch(**m) for m in wanted["matches"]], wanted.get("error"))
     elif action == "recheck_item":
         item = store.get_item(sel.get("item_id", ""))
         if item is None or item["user_id"] != sender:
@@ -906,6 +1035,10 @@ async def handle_text(ctx: Context, sender: str, text: str):
         url = URL_RE.search(text).group(0).rstrip(".,)")
         await say(ctx, sender, card("Got the link. What did you pay?", "form",
                                     add_item_form(new_item_id(), url)))
+    elif not is_direct(text) and not re.search(r"\b(hi|hello|hey|menu|help|start)\b", text.lower()[:40]):
+        # Plain text we don't recognise is almost always an ASI:One assistant talking, not the user: answering
+        # it with the menu is what keeps bot-to-bot loops going. Greetings still get the menu.
+        ctx.logger.info(f"no action in plain text from {sender}, not answering")
     else:
         n = len(store.pending_receipts(sender))
         nudge = f" You have {n} new receipt{'s' if n != 1 else ''} to review." if n else ""

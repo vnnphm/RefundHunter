@@ -178,5 +178,5 @@ def oauth_callback(state: str = "", code: str = "", error: str = ""):
     if not sent:
         return page("Something went wrong", "Couldn't reach Refund Hunter. Please try again in a minute.", 502)
     return page(f"Found {len(emails)} order email{'s' if len(emails) != 1 else ''}",
-                "Head back to ASI:One: Refund Hunter will show each receipt for you to review. "
-                "If nothing shows up, ask \"any new receipts?\". Nothing from your inbox was stored.")
+                "Head back to ASI:One and send \"@refundhunter any new receipts?\" to review them. "
+                "Nothing from your inbox was stored.")

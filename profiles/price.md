@@ -6,7 +6,7 @@
 Gets the live price of a product you bought, and finds a store's listing when a receipt only has the item's name.
 
 - **Live prices** on Amazon, Walmart, Target and Best Buy through Bright Data's ready-made Scraper API. Prices are cached for 10 minutes so repeat checks are free.
-- **Store search**: a receipt item without a link (a paper receipt, a screenshot, or a Walmart email) is searched on Amazon or Walmart, and the top 3 matches go back so the shopper picks the right one. Sponsored results are skipped.
+- **Store search**: a receipt item without a link (a paper receipt, a screenshot, or a Walmart email) is searched on Amazon or Walmart, and the top 3 matches go back so the shopper picks the right one. Sponsored listings are shown last.
 - Jobs run in the background, so a slow scrape never holds up the next request.
 
 ## How to use it
