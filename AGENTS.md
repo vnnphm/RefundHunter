@@ -8,7 +8,7 @@ Fetch.ai uAgents that find money users are owed on past purchases. Users only ta
 
 **Phase 1 (must ship):** user adds an item in ASI:One → we fetch its live price with Bright Data → chat shows "Dropped $X" or "No change".
 **Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (the user taps **Connect Gmail** and FastAPI `server.py` reads their recent orders once). See Email receipts.
-**Phase 3 (if time):** refund policy check, claim draft, Payment Protocol.
+**Phase 3 (if time):** refund policy check, claim draft (see Refund requests), Payment Protocol.
 
 Build in phase order. Don't start a phase until the one before works in ASI:One.
 
@@ -21,8 +21,8 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
 | Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data; searches Amazon or Walmart for receipt items without a link | `TrackItem`, `FindProduct` | `PriceResult`, `FindResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
-| Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when | `TrackItem` | `PolicyResult` |
-| Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
+| Policy agent | `policy_agent.py` | 3 | Which request makes sense for this store, and the deadline (rules, no LLM) | `PolicyCheck` | `PolicyResult` |
+| Claim writer | `claim_agent.py` | 3 | Drafts the refund request the user pastes into the store's chat | `ClaimRequest` | `ClaimDraft` |
 
 Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: Gmail connect, plus an optional forwarding webhook), `gmail.py` (Google OAuth + Gmail API), Bright Data.
 
@@ -34,7 +34,7 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: Gmail conne
 
 **Flow (Phase 2, Gmail connect):** menu → **Connect Gmail** → signed link → Google sign-in → `server.py` reads up to 10 recent order emails once, revokes the token → `Receipt(user_id=<from the link>)` each → coordinator → parser agent → same as above.
 
-## Who owns what (2 people)
+## Who owns what
 
 | | Person A: ASI:One side | Person B: data side |
 | --- | --- | --- |
@@ -42,6 +42,8 @@ Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: Gmail conne
 | Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path A) → price agent answers `TrackItem` with `PriceResult` |
 | Phase 2 | Email path (Connect Gmail: `server.py`, `gmail.py`) + `ParsedReceipt` handling and review card in `agent.py` | Parser agent: `asi1` reads photos and email text, replies `ParsedReceipt` to its sender |
 | Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
+
+**Phase 3:** the policy agent (`policy_agent.py`) is MM77a's, the claim agent (`claim_agent.py`) is Jiayi's, and Vinny wires both into the coordinator. Until an agent is ready, the coordinator shows a labelled test result, and each agent can be tested alone with a script that sends its request model. See Refund requests.
 
 `models.py` is shared: write it together first and change it only together. Work on separate branches and merge often.
 
@@ -113,6 +115,48 @@ class FindResult(Model):      # price agent -> coordinator
 
 A price counts as dropped when `price_paid - current_price > 1` and `ok` is true.
 
+**Phase 3 (proposed: agree before building, then add to `models.py`):**
+```python
+class PolicyCheck(Model):     # coordinator -> policy agent, when a drop is found
+    item_id: str
+    store: str                # "amazon" | "walmart" | "other" today; "target" | "bestbuy" later
+    purchase_date: str = ""   # YYYY-MM-DD; "" if unknown (item added by hand)
+    price_paid: float
+    current_price: float
+
+class PolicyResult(Model):    # policy agent -> coordinator
+    item_id: str
+    ok: bool
+    action: str = "none"      # "price_adjustment" | "goodwill_credit" | "return_rebuy" | "none"
+    deadline: str = ""        # YYYY-MM-DD, last day to act; "" if the purchase date is unknown
+    where: str = ""           # how to reach the store, with its help/chat link
+    summary: str = ""         # one line for the card, e.g. "Return & rebuy by Nov 12 to save $6.02"
+    source_url: str = ""      # the policy page the rule comes from
+    error: Optional[str] = None
+
+class ClaimRequest(Model):    # coordinator -> claim agent, when the user taps "Draft a refund request"
+    item_id: str
+    user_id: str
+    store: str
+    item_name: str
+    product_url: str = ""
+    price_paid: float
+    current_price: float
+    purchase_date: str = ""   # YYYY-MM-DD, from the receipt
+    order_number: str = ""
+    action: str = ""          # from PolicyResult; "" = the claim agent picks its default for the store
+    deadline: str = ""        # from PolicyResult; never guessed
+
+class ClaimDraft(Model):      # claim agent -> coordinator
+    item_id: str
+    user_id: str
+    ok: bool
+    action: str = ""
+    message: str = ""         # ready to paste, plain text
+    where: str = ""           # how to send it (PolicyResult.where, or the claim agent's default)
+    error: Optional[str] = None
+```
+
 ## Setup
 
 - **Python 3.13 only.** uagents 0.26.1 crashes on 3.14 (`RuntimeError: There is no current event loop`); Fetch docs v1.0.5 support 3.10–3.13. `pyproject.toml` caps it at `<3.14`.
@@ -129,9 +173,9 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, and for Gmail connect: `PUBLIC_URL`, `OAUTH_STATE_SECRET` (both: coordinator and server), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (server). Optional forwarding only: `WEBHOOK_SECRET`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, and for Gmail connect: `PUBLIC_URL`, `OAUTH_STATE_SECRET` (both: coordinator and server), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (server), and for Phase 3: `POLICY_AGENT_SEED`, `POLICY_AGENT_ADDRESS`, `CLAIM_AGENT_SEED`, `CLAIM_AGENT_ADDRESS` (the claim agent also uses `ASI_ONE_API_KEY`). Optional forwarding only: `WEBHOOK_SECRET`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
-- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, email webhook (`server.py`) 8000.
+- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, claim agent 8004, policy agent 8005, email webhook (`server.py`) 8000.
 
 ## Run and connect
 
@@ -410,6 +454,38 @@ Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `4
 
 **`server.py` `/email`** (forwarding only): checks the `X-Webhook-Secret` header, takes the user's address from `forwarded_for`, else `to` on an auto-forward, else `from`, and sends `Receipt(user_id="", sender=<email>)` the same way as above. `cloudflared tunnel --url http://localhost:8000` works for testing it locally.
 
+
+## Refund requests (Phase 3)
+
+Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. Nothing here is built yet.
+
+**Why.** Finding a drop isn't the money. Stores don't refund drops on their own, and returns can't be automated: they sit behind the user's login and change often. But store chats (Target, Best Buy, Amazon customer service) take a pasted message. So the last step is: **"Dropped $6.02" → tap "Draft a refund request" → where to send it, and a ready-to-paste message.** The user sends it; we never contact a store.
+
+**Flow.** `PriceResult` shows a drop → coordinator sends `PolicyCheck` → `PolicyResult` saved in the coordinator's `ctx.storage` under `policy:<item_id>`, its `summary` added to the price card → user taps **Draft a refund request** → `ClaimRequest` (item facts + the policy's `action`/`deadline`) → `ClaimDraft` → coordinator sends "Paste this into {where} by {deadline}:" and then the message alone (so it copies cleanly). Each agent works without the other: no policy → the claim agent picks its default action and states no deadline; no claim agent → the card still shows the policy summary.
+
+**Policy agent (`policy_agent.py`, MM77a; port 8005, `POLICY_AGENT_SEED`, mailbox)**
+- A rule table, no LLM: store → `action`, window in days, `where` (help/chat link), `source_url`. `deadline` = purchase date + window; empty when the purchase date is unknown; `action="none"` with a `summary` like "Return window closed Oct 30" when it's passed.
+- What we know so far (**verify each against the store's current policy page, and put that URL and the date checked in the table**): Amazon and Walmart don't refund price drops after purchase, so the options are return & rebuy within the return window, or (Amazon) asking customer service for a goodwill credit, which isn't guaranteed. Target and Best Buy offer price adjustments within a set window. Many items have different windows (electronics, holiday season); start with the default window and say so in `summary`.
+- `store` is "amazon" | "walmart" | "other" today (`store_for` in `agent.py`); add "target"/"bestbuy" rows now so they work once we track those stores.
+- Always reply with a `PolicyResult` (unknown store → `ok=True, action="none"`, a `summary` saying to check the store's policy).
+
+**Claim agent (`claim_agent.py`, Jiayi; port 8004, `CLAIM_AGENT_SEED`, mailbox)**
+- `asi1` writes the message: `AsyncOpenAI(api_key=ASI_ONE_API_KEY, base_url="https://api.asi1.ai/v1")`, `model="asi1"`, like `parser_agent.py`. Plain text, polite, under ~120 words, asks for the one thing in `action`, and uses **only the facts given** (item, prices, the difference, order number, purchase date, deadline). Never invent a policy, date, order number or promise.
+- Default when `action` is empty: Amazon → goodwill credit, Walmart → return & rebuy, other → price adjustment; with a default `where` per store (help/chat link).
+- Template fallback (no key, asi1 error, empty answer): a fixed message filled from the same facts, so the button always gives something usable.
+- uagents runs an agent's handlers one at a time: start the asi1 call in the background and return (copy `background()` from `price_agent.py`). Always reply with a `ClaimDraft`.
+- A `--check` CLI, e.g. `uv run claim_agent.py --check amazon "Ticonderoga pencils" 4.50 2.97`, prints one draft.
+
+**Coordinator side (Vinny, once an agent is ready)**
+- `store.py`: add `purchase_date` and `order_number` to `items` (an `ALTER TABLE` migration in `connect()`), filled from the receipt when an item is tracked from one (direct link, search pick or link form).
+- `show_price`: on a drop, send `PolicyCheck` if `POLICY_AGENT_ADDRESS` is set; `on_policy_result` saves it and sends the summary.
+- `price_detail`: a **Draft a refund request** button (`{"action": "draft_claim", "item_id"}`) on drops; `draft_claim` builds the `ClaimRequest`; `on_claim_draft` sends the two messages through `say()`.
+- Senders are checked (`POLICY_AGENT_ADDRESS`, `CLAIM_AGENT_ADDRESS`); until those are set, a labelled test result stands in.
+
+**Rules**
+- Never log the draft text or order numbers (item id, store, action and timing only).
+- The user sends every message; no agent contacts a store or logs into anything.
+- Don't state a deadline or policy the policy agent didn't return.
 
 ## Submission checklist
 
