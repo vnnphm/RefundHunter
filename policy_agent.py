@@ -53,8 +53,10 @@ RULES = {
         "name": "Target",
         "steps": [("price_adjustment", 14), ("return_rebuy", 90)],
         "where": "Target guest services chat: https://help.target.com",
+        # Price match: Target's own lower price, today or in the past 14 days, original receipt required
+        # (target.com/help/articles/policies-guidelines/price-match-guarantee, checked 2026-10-25).
         "source_url": "https://www.target.com/returns",
-        "checked": "2026-10-24",  # the 90-day return window; the 14-day price match isn't read live yet
+        "checked": "2026-10-25",
         "notes": {"return_rebuy": "Target-brand items: 365 days", "none": "Target-brand items: 365 days"},
     },
     "bestbuy": {
@@ -63,8 +65,11 @@ RULES = {
         "steps": [("price_adjustment", 15)],
         "where": "Best Buy chat, or call 1-888-237-8289: https://www.bestbuy.com/site/customer-service",
         "source_url": "https://www.bestbuy.com/site/help-topics/price-match-guarantee/pcmcat290300050002.c",
-        "checked": "2026-10-25",  # the price match rule; the 15-day return period isn't read live yet
-        "notes": {"price_adjustment": "longer for My Best Buy members", "none": "longer for My Best Buy members"},
+        # Return and exchange period: 15 days; My Best Buy Plus/Total 60 days; activatable devices 14 days
+        # (bestbuy.com/site/help-topics/return-exchange-policy/pcmcat260800050014.c, checked 2026-10-25).
+        "checked": "2026-10-25",
+        "notes": {"price_adjustment": "Plus/Total members: 60 days; phones: 14",
+                  "none": "Plus/Total members: 60 days; phones: 14"},
     },
 }
 
