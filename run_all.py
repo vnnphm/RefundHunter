@@ -53,7 +53,11 @@ def prepare_env() -> tuple[dict[str, str], set[str]]:
                   f"To run your own instead, clear the value after {addr_key}= in .env, save, and run this again.")
         elif current != address:
             print(f"Note: {addr_key} in .env isn't this coordinator's address; server.py sends emails there.")
-    return dotenv_values(ENV), remote
+    saved = dotenv_values(ENV)
+    if any(not saved.get(k) or saved[k].startswith("change-me") for _, _, k, _ in AGENTS):
+        sys.exit(f"Couldn't save the seeds in {ENV}. Close that file in your editor without saving, then run this again.")
+    print(f"Seeds and addresses are in {ENV.resolve()}")
+    return saved, remote
 
 
 def relay(name: str, proc: subprocess.Popen):
