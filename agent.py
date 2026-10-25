@@ -46,7 +46,7 @@ agent = Agent(
     port=8001,
     mailbox=True,
     **profile("coordinator", "Finds money you're owed on past purchases. Connect Gmail or upload a receipt "
-                             "photo; Refund Hunter tracks each item's price on Amazon and Walmart, messages you "
+                             "photo; Refund Hunter tracks prices at Amazon, Walmart, Target and Best Buy, messages you "
                              "when it drops, and drafts the refund request to paste into the store's chat."),
 )
 chat = Protocol(spec=chat_protocol_spec)
@@ -167,7 +167,7 @@ def link_email_form() -> dict:
 
 def receipt_review(rec: dict, mock: bool) -> dict:
     source = "receipt photo" if rec["message_id"].startswith("photo_") else "email"
-    shop = rec["store"].title() if rec["store"] and rec["store"] != "other" else "store"
+    shop = shop_name(rec["store"]) or "store"
     rows = [{"label": it["name"][:60], "value": f"${it['price_paid']:.2f}"} for it in rec["items"]]
     if rec["purchase_date"]:
         rows.append({"label": "Bought", "value": rec["purchase_date"]})
@@ -192,7 +192,7 @@ def price_detail(item: dict, mock: bool, policy: dict | None = None) -> dict:
         {"label": "You paid", "value": f"${item['price_paid']:.2f}"},
         {"label": "Price now", "value": f"${item['current_price']:.2f}"},
         {"label": "Result", "value": f"Dropped ${drop:.2f}" if drop > 1 else "No change"},
-        {"label": "Store", "value": item["store"].title()},
+        {"label": "Store", "value": shop_name(item["store"]) or "Other"},
         {"label": "Checked", "value": item["checked_at"][:16].replace("T", " ") + " UTC"},
     ]
     if drop > 1 and (policy or {}).get("summary"):  # from the policy agent
@@ -224,8 +224,8 @@ def items_carousel(items: list[dict]) -> dict:
             badge, secondary = {"label": "No change", "variant": "info"}, f"Now ${now:.2f}"
         tiles.append({
             "id": it["item_id"],
-            "title": it["name"] or it["store"].title() + " item",
-            "subtitle": f"{it['store'].title()} · paid ${it['price_paid']:.2f}",
+            "title": it["name"] or (shop_name(it["store"]) or "Store") + " item",
+            "subtitle": f"{shop_name(it['store']) or 'Other store'} · paid ${it['price_paid']:.2f}",
             "badges": [badge],
             "secondary_text": secondary,
             "primary_cta": {"label": "View",
@@ -237,6 +237,7 @@ def items_carousel(items: list[dict]) -> dict:
 
 
 SEARCHABLE = ("amazon", "walmart")  # stores the price agent can search by item name
+PRICED = ("amazon", "walmart", "target", "bestbuy")  # stores the price agent can check
 
 
 def match_carousel(item_id: str, name: str, price_paid: float, matches: list, shop: str = "amazon",
@@ -247,7 +248,7 @@ def match_carousel(item_id: str, name: str, price_paid: float, matches: list, sh
         if m.price and price_paid - m.price > 1:
             badge = {"label": f"${price_paid - m.price:.2f} less now", "variant": "success"}
         else:
-            badge = {"label": shop.title(), "variant": "info"}
+            badge = {"label": shop_name(shop) or "Store", "variant": "info"}
         tiles.append({
             "id": m.product_url.rsplit("/", 1)[-1],
             "title": m.name[:80],
@@ -319,13 +320,25 @@ def parse_selection(text: str) -> dict:
     return sel
 
 
+STORE_NAMES = {"amazon": "Amazon", "walmart": "Walmart", "target": "Target", "bestbuy": "Best Buy"}
+
+
 def store_for(url: str) -> str:
     host = urlparse(url).netloc.lower()
     if "amazon." in host or host.endswith("amzn.to"):
         return "amazon"
     if "walmart." in host:
         return "walmart"
+    if host == "target.com" or host.endswith(".target.com"):
+        return "target"
+    if "bestbuy." in host:
+        return "bestbuy"
     return "other"
+
+
+def shop_name(store: str) -> str:
+    """'Best Buy' for "bestbuy"; "" for "other" or unknown."""
+    return STORE_NAMES.get(store, "")
 
 
 def parse_price(value) -> float | None:
@@ -514,7 +527,7 @@ def mock_parse(r: Receipt) -> ParsedReceipt:
         return ParsedReceipt(message_id=r.message_id, user_id=r.user_id, ok=False, error="no price found")
     name = re.sub(r"^\s*((fwd?|fw):\s*)+", "", r.subject, flags=re.I).strip() or "Item from your email"
     lower = r.body.lower()
-    shop = store_for(url) if url else ("amazon" if "amazon" in lower else "walmart" if "walmart" in lower else "other")
+    shop = store_for(url) if url else next((k for k in STORE_NAMES if re.search(rf"\b{k}\b", lower.replace("best buy", "bestbuy"))), "other")
     return ParsedReceipt(message_id=r.message_id, user_id=r.user_id, ok=True, store=shop,
                          items=[{"name": name[:80], "price_paid": float(price.group(1).replace(",", "")),
                                  "product_url": url}])
@@ -612,7 +625,7 @@ async def show_matches(ctx: Context, user: str, item_id: str, wanted: dict, ok: 
         await say(ctx, user, card("Not listed? Paste the link.", "form", form))
     else:
         ctx.logger.info(f"search {item_id} found nothing: {error or 'no matches'}")
-        await say(ctx, user, card(f"I couldn't find {name[:60]} on {shop.title()}. What's the link?",
+        await say(ctx, user, card(f"I couldn't find {name[:60]} on {shop_name(shop) or 'the store'}. What's the link?",
                                   "form", form))
 
 
@@ -732,7 +745,9 @@ async def track_new_item(ctx: Context, sender: str, url: str, price: float, name
         await say(ctx, sender, reply("That item is already being tracked."))
         return
     ctx.logger.info(f"saved {item_id} ({shop}) for {sender}")
-    await say(ctx, sender, reply(f"Tracking it: paid ${price:.2f} at {shop.title()}. Checking price…"))
+    where = f" at {shop_name(shop)}" if shop_name(shop) else ""
+    note = "" if shop in PRICED else " (I can only check Amazon, Walmart, Target and Best Buy prices so far.)"
+    await say(ctx, sender, reply(f"Tracking it: paid ${price:.2f}{where}. Checking price…{note}"))
     await request_price(ctx, TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop))
 
 
@@ -795,7 +810,7 @@ async def handle_text(ctx: Context, sender: str, text: str):
             elif searchable(rec, it):  # search for it, user picks
                 item_id = early.get(str(i))
                 wanted = ctx.storage.get(f"find:{item_id}") if item_id else None
-                shop = rec["store"].title()
+                shop = shop_name(rec["store"])
                 if wanted and wanted.get("done"):  # the early search already finished
                     ctx.storage.remove(f"find:{item_id}")
                     await show_matches(ctx, sender, item_id, wanted, wanted["ok"],

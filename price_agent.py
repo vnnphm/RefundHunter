@@ -20,6 +20,8 @@ BD_API = "https://api.brightdata.com/datasets/v3"
 DATASETS = {
     "amazon": "gd_l7q7dkf244hwjntr0",   # Amazon products
     "walmart": "gd_l95fol7l1ru6rlo116",  # Walmart - products
+    "target": "gd_ltppk5mx2lp0v1k0vo",   # Target
+    "bestbuy": "gd_ltre1jqe1jfr7cccf",   # Best Buy products
 }
 SEARCH_LIMIT = 3  # records are billed one credit each: ask for only what the carousel shows
 PRICE_FIELDS = ("final_price", "price", "initial_price")
@@ -37,7 +39,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8002,
     mailbox=True,
-    **profile("price", "Refund Hunter's price agent. Gets a product's live price on Amazon or Walmart with Bright Data's Scraper API, and finds a store's listing for a receipt item by its name. Answers TrackItem with PriceResult and FindProduct with FindResult."),
+    **profile("price", "Refund Hunter's price agent. Gets a product's live price at Amazon, Walmart, Target or Best Buy with Bright Data's Scraper API, and finds a store's listing for a receipt item by its name. Answers TrackItem with PriceResult and FindProduct with FindResult."),
 )
 
 _cache: dict[str, tuple[float, float, str | None]] = {}  # url -> (time, price, title)
@@ -288,7 +290,7 @@ if __name__ == "__main__":
         # uv run price_agent.py --search "<item name>" [amazon|walmart]
         asyncio.run(search_once(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "amazon"))
     elif len(sys.argv) > 1 and sys.argv[1] == "--check":
-        # uv run price_agent.py --check <url> [amazon|walmart]
+        # uv run price_agent.py --check <url> [amazon|walmart|target|bestbuy]
         asyncio.run(check_once(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "amazon"))
     else:
         agent.run()
