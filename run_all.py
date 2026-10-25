@@ -45,7 +45,9 @@ def prepare_env() -> dict[str, str]:
         if not current:
             set_key(ENV, addr_key, address, quote_mode="never")
         elif current != address:
-            print(f"Note: {addr_key} in .env is another agent's address; leaving it as is")
+            print(f"Note: {addr_key} in .env doesn't match this {name} agent's seed, so messages go to that other "
+                  f"address. To use the {name} agent started here, clear the value after {addr_key}= in .env, "
+                  "save, and run this again.")
     return dotenv_values(ENV)
 
 
