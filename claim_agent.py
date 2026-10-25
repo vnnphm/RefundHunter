@@ -49,6 +49,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8004,
     mailbox=True,
+    handle_messages_concurrently=True,  # one slow job mustn't block the rest
     **profile("claim", "Refund Hunter's claim writer. ASI:One (asi1) drafts a short, polite refund request for the shopper to paste into the store's chat, using only the facts it's given. Answers ClaimRequest with ClaimDraft."),
 )
 
@@ -157,17 +158,10 @@ async def draft(req: ClaimRequest, log=print) -> ClaimDraft:
                       where=DEFAULT_WHERE.get(req.store, DEFAULT_WHERE["other"]))
 
 
-_jobs: set[asyncio.Task] = set()
+# uagents runs an agent's handlers one at a time unless handle_messages_concurrently is on (see Agent above):
+# with it, a slow job doesn't hold up the requests behind it, and replying inside the handler keeps uagents'
+# reply check happy. At most MAX_JOBS jobs run at once.
 _slots = asyncio.Semaphore(MAX_JOBS)
-
-
-def background(coro):
-    async def run():
-        async with _slots:
-            await coro
-    task = asyncio.get_running_loop().create_task(run())
-    _jobs.add(task)  # keep a reference so the task isn't garbage-collected mid-call
-    task.add_done_callback(_jobs.discard)
 
 
 @agent.on_message(model=ClaimRequest, replies=ClaimDraft)
@@ -175,7 +169,8 @@ async def on_claim_request(ctx: Context, sender: str, req: ClaimRequest):
     if COORDINATOR_ADDRESS and sender != COORDINATOR_ADDRESS:  # each draft is an asi1 call
         ctx.logger.warning(f"ignoring ClaimRequest from unexpected sender {sender}")
         return
-    background(answer_claim(ctx, sender, req))
+    async with _slots:
+        await answer_claim(ctx, sender, req)
 
 
 async def answer_claim(ctx: Context, sender: str, req: ClaimRequest):

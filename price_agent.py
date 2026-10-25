@@ -26,7 +26,9 @@ DATASETS = {
 SEARCH_LIMIT = 3  # records are billed one credit each: ask for only what the carousel shows
 PRICE_FIELDS = ("final_price", "price", "initial_price")
 POLL_LIMIT_S = 180
-SEARCH_LIMIT_S = 75  # a search slower than this gets the link form instead: pasting beats waiting
+# A search slower than this gets the link form instead. Walmart's search took 50-240 s in tests (Amazon's ~7 s);
+# it starts when the review card appears, so most of the wait happens while the user reads the card.
+SEARCH_LIMIT_S = {"amazon": 75, "walmart": 150}
 MAX_JOBS = 4  # Bright Data jobs at once
 CACHE_TTL_S = 600  # free tier credits are shared: don't re-scrape a URL for 10 min
 
@@ -39,6 +41,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8002,
     mailbox=True,
+    handle_messages_concurrently=True,  # one slow job mustn't block the rest
     **profile("price", "Refund Hunter's price agent. Gets a product's live price at Amazon, Walmart, Target or Best Buy with Bright Data's Scraper API, and finds a store's listing for a receipt item by its name. Answers TrackItem with PriceResult and FindProduct with FindResult."),
 )
 
@@ -143,24 +146,17 @@ async def get_price(req: TrackItem, client: httpx.AsyncClient | None = None) -> 
     return PriceResult(item_id=req.item_id, ok=True, current_price=price, title=title, checked_at=now)
 
 
-# uagents runs an agent's handlers one at a time, so a slow scrape would hold up every request
-# behind it. Handlers start the job in the background and return; MAX_JOBS run at once.
-_jobs: set[asyncio.Task] = set()
+# uagents runs an agent's handlers one at a time unless handle_messages_concurrently is on (see Agent above):
+# with it, a slow job doesn't hold up the requests behind it, and replying inside the handler keeps uagents'
+# reply check happy. At most MAX_JOBS jobs run at once.
 _slots = asyncio.Semaphore(MAX_JOBS)
-
-
-def background(coro):
-    async def run():
-        async with _slots:
-            await coro
-    task = asyncio.get_running_loop().create_task(run())
-    _jobs.add(task)  # keep a reference so the task isn't garbage-collected mid-scrape
-    task.add_done_callback(_jobs.discard)
 
 
 @agent.on_message(model=TrackItem, replies=PriceResult)
 async def on_track(ctx: Context, sender: str, req: TrackItem):
-    background(answer_track(ctx, sender, req))
+    ctx.logger.info(f"price {req.item_id} [{req.store}] started")
+    async with _slots:
+        await answer_track(ctx, sender, req)
 
 
 async def answer_track(ctx: Context, sender: str, req: TrackItem):
@@ -218,7 +214,7 @@ async def search_records(query: str, store: str, client: httpx.AsyncClient | Non
     dataset_id, make_input, _ = SEARCHES[store]
     query = query.strip().rstrip(".…").strip()[:80]  # a cut-off name ("Corrugated Sh...") searches badly
     return await scrape_records(make_input(query), dataset_id, {"limit_per_input": SEARCH_LIMIT}, client,
-                                limit_s=SEARCH_LIMIT_S)
+                                limit_s=SEARCH_LIMIT_S.get(store, 75))
 
 
 async def find_products(query: str, store: str = "amazon",
@@ -227,10 +223,11 @@ async def find_products(query: str, store: str = "amazon",
     hits = []
     for rec in await search_records(query, store, client):
         hit, price = SEARCHES[store][2](rec), pick_price(rec)
-        if hit and price is not None and not hit[2]:
-            hits.append((hit[1], hit[0], price, rec))
+        if hit and price is not None:
+            hits.append((hit[2], hit[1], hit[0], price, rec))
     matches = []
-    for _, url, price, rec in sorted(hits, key=lambda h: h[0])[:SEARCH_LIMIT]:
+    # Sponsored results go last but stay: an ad is still a real listing, often the exact item bought.
+    for _, _, url, price, rec in sorted(hits, key=lambda h: (h[0], h[1]))[:SEARCH_LIMIT]:
         name = english_name(rec)
         _cache[url] = (time.time(), price, name)
         matches.append(ProductMatch(name=name, product_url=url, price=price, image_url=rec.get("image") or ""))
@@ -240,7 +237,8 @@ async def find_products(query: str, store: str = "amazon",
 @agent.on_message(model=FindProduct, replies=FindResult)
 async def on_find(ctx: Context, sender: str, req: FindProduct):
     ctx.logger.info(f"search {req.item_id} [{req.store}] started")
-    background(answer_find(ctx, sender, req))
+    async with _slots:
+        await answer_find(ctx, sender, req)
 
 
 async def answer_find(ctx: Context, sender: str, req: FindProduct):
