@@ -5,7 +5,6 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -18,6 +17,7 @@ from uagents_core.contrib.protocols.chat import (
 
 import gmail
 import store
+from agentverse_profile import profile
 from models import (ClaimDraft, ClaimRequest, FindProduct, FindResult, ParsedReceipt, PolicyCheck, PolicyResult,
                     PriceResult, ProductMatch, Receipt, TrackItem)
 
@@ -40,21 +40,14 @@ SEED = os.getenv("AGENT_SEED", "")
 if not SEED or SEED.startswith("change-me"):
     sys.exit("Set your own AGENT_SEED in .env (see README). Same seed = same address as someone else.")
 
-# uagents re-publishes these to the Agentverse profile on every start, so they live here: anything left
-# out would be sent empty and wipe what was set in the Agentverse dashboard.
-AVATAR_URL = "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/257797515.jpg"
-DESCRIPTION = ("Finds money you're owed on past purchases. Connect Gmail or upload a receipt photo; Refund Hunter "
-               "tracks each item's price on Amazon and Walmart, tells you when it drops, and drafts the refund "
-               "request to paste into the store's chat.")
-
 agent = Agent(
     name="refund-hunter",
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8001,
     mailbox=True,
-    avatar_url=AVATAR_URL,
-    description=DESCRIPTION,
-    readme_path=str(Path(__file__).with_name("agent_profile.md")),
+    **profile("coordinator", "Finds money you're owed on past purchases. Connect Gmail or upload a receipt "
+                             "photo; Refund Hunter tracks each item's price on Amazon and Walmart, messages you "
+                             "when it drops, and drafts the refund request to paste into the store's chat."),
 )
 chat = Protocol(spec=chat_protocol_spec)
 

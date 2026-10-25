@@ -510,7 +510,7 @@ Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built
 - [ ] README lists every agent's name and address, plus both badges:
   `![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)`
   `![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)`
-- [ ] Each agent's Agentverse profile: clear name, description under 300 characters, example prompts
+- [x] Each agent's Agentverse profile: clear name, description under 300 characters, example prompts. Set in code: `Agent(..., **profile("<name>", "<description>"))` from `agentverse_profile.py`, readme in `profiles/<name>.md`. uagents re-publishes the profile on every start, so edits made only in the Agentverse dashboard get wiped: change these files instead.
 - [ ] Public ASI:One shared chat link showing the full flow
 - [ ] 3–5 minute demo video, Devpost, CalHacks ASI:One Submission Agent
 

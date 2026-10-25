@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from uagents import Agent, Context
 
 from asi import LLMError, ask_json
+from agentverse_profile import profile
 from models import ParsedReceipt, Receipt, ReceiptItem
 
 load_dotenv()
@@ -31,6 +32,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8003,
     mailbox=True,
+    **profile("parser", "Refund Hunter's receipt reader. ASI:One (asi1) reads a receipt photo or an order email into the store, purchase date, order number and each item with its price. Answers Receipt with ParsedReceipt."),
 )
 
 PROMPT = """You read purchase receipts: a photo of a paper receipt, or the text of an order email.
