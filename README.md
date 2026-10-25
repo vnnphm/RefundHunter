@@ -2,6 +2,16 @@
 
 ## Run it locally
 
+**Quickest way: one command for all agents.** Install uv (step 1 below), open this folder in VS Code, then Terminal → New Terminal and run:
+
+```bash
+uv run run_all.py
+```
+
+The first run creates `.env`, makes your own seeds, and saves every agent address in it. Paste your `BRIGHTDATA_API_TOKEN` and `ASI_ONE_API_KEY` into `.env` (click it in VS Code's file list), save, and run the command again. It starts the price, policy, parser and coordinator agents and prints their addresses. Open each "Agent inspector available at" link in Chrome or Brave, then Connect → Mailbox → Finish. Ctrl+C stops all of them. Then @mention the coordinator address in ASI:One.
+
+**Step by step instead:**
+
 1. Install uv: `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`).
 2. `uv sync` — installs Python 3.13 if needed and the exact locked dependencies.
 3. `cp .env.example .env` and set `AGENT_SEED` and `PRICE_AGENT_SEED` to your **own** random values. Make one with `uv run python -c "import secrets; print(secrets.token_hex(32))"`. Don't reuse a teammate's seed: the same seed gives the same agent address, and two running copies will conflict. The agents won't start with the `change-me…` placeholders.
