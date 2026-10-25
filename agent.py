@@ -444,7 +444,8 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
                         if quiet["by"] == "watch" else f"Price dropped ${drop:.2f}!")
             ctx.logger.info(f"{quiet['by']} re-check {item['item_id']}: drop ${drop:.2f}, telling {user}")
             if quiet["by"] == "watch":  # ASI:One may hand this to the user's assistant; ntfy reaches the phone
-                await push_phone(ctx, f"{item['name'] or 'An item you bought'} dropped ${drop:.2f}",
+                short = (item["name"] or "An item you bought").split(":")[0].split(",")[0][:60].strip()
+                await push_phone(ctx, f"{short} dropped ${drop:.2f}",
                                  f"Now ${item['current_price']:.2f} at {shop_name(item['store']) or 'the store'}, "
                                  f"you paid ${item['price_paid']:.2f}. Open ASI:One and say "
                                  f"\"@refundhunter show my items\" to claim it.")
@@ -846,15 +847,15 @@ def planner_loop(ctx: Context, sender: str, text: str) -> bool:
         _prose_at.pop(sender, None)
         return False
     if not ANSWER_PLAIN_TEXT:
-        ctx.logger.info(f"ignoring plain text from {sender} (not a card tap or @mention)")
+        ctx.logger.debug(f"ignoring plain text from {sender} (not a card tap or @mention)")
         return True
     if BOT_CHATTER.search(text):
-        ctx.logger.info(f"ignoring planner chatter from {sender}")
+        ctx.logger.debug(f"ignoring planner chatter from {sender}")
         return True
     now = time.monotonic()
     recent = [t for t in _prose_at.get(sender, []) if now - t < PROSE_WINDOW_S]
     if len(recent) >= PROSE_MAX:
-        ctx.logger.info(f"ignoring plain text from {sender}: {len(recent)} in {PROSE_WINDOW_S}s with no click or @mention")
+        ctx.logger.debug(f"ignoring plain text from {sender}: {len(recent)} in {PROSE_WINDOW_S}s with no click or @mention")
         return True
     _prose_at[sender] = recent + [now]
     return False
@@ -891,7 +892,7 @@ async def handle_text(ctx: Context, sender: str, text: str):
         await say(ctx, sender, reply(f"Linked {email}. {where}"))
     elif action == "connect_gmail":
         if not is_direct(text):  # an assistant mentioning Gmail isn't a request, and it calls the link phishing
-            ctx.logger.info(f"ignoring a plain-text Gmail mention from {sender}")
+            ctx.logger.debug(f"ignoring a plain-text Gmail mention from {sender}")
             return
         if not gmail.configured():
             await say(ctx, sender, reply("Gmail connect isn't set up yet. You can upload a receipt photo instead."))
@@ -1038,7 +1039,7 @@ async def handle_text(ctx: Context, sender: str, text: str):
     elif not is_direct(text) and not re.search(r"\b(hi|hello|hey|menu|help|start)\b", text.lower()[:40]):
         # Plain text we don't recognise is almost always an ASI:One assistant talking, not the user: answering
         # it with the menu is what keeps bot-to-bot loops going. Greetings still get the menu.
-        ctx.logger.info(f"no action in plain text from {sender}, not answering")
+        ctx.logger.debug(f"no action in plain text from {sender}, not answering")
     else:
         n = len(store.pending_receipts(sender))
         nudge = f" You have {n} new receipt{'s' if n != 1 else ''} to review." if n else ""
@@ -1056,7 +1057,9 @@ async def on_message(ctx: Context, sender: str, msg: ChatMessage):
             ctx.logger.info(f"session started by {sender}")
             await say(ctx, sender, accepts_attachments())
         elif isinstance(item, TextContent):
-            ctx.logger.info(f"text from {sender}: {EMAIL_RE.sub('<email>', item.text[:120])}")
+            # Only what the user sent: ignored assistant chatter stays out of the log (debug level).
+            log = ctx.logger.info if ANSWER_PLAIN_TEXT or is_direct(item.text) else ctx.logger.debug
+            log(f"text from {sender}: {EMAIL_RE.sub('<email>', item.text[:120])}")
             if not has_photo:  # a caption on a photo gets one reply, below
                 await handle_text(ctx, sender, item.text)
         elif isinstance(item, ResourceContent):
@@ -1078,14 +1081,14 @@ async def on_message(ctx: Context, sender: str, msg: ChatMessage):
         elif isinstance(item, EndSessionContent):
             ctx.logger.info(f"session ended by {sender}")
         elif isinstance(item, MetadataContent):  # keys only: find out if card clicks arrive here
-            ctx.logger.info(f"metadata from {sender}: keys={sorted(item.metadata)}")
+            ctx.logger.debug(f"metadata from {sender}: keys={sorted(item.metadata)}")
         else:
-            ctx.logger.info(f"ignoring {type(item).__name__} from {sender}")
+            ctx.logger.debug(f"ignoring {type(item).__name__} from {sender}")
 
 
 @chat.on_message(ChatAcknowledgement)
 async def on_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
-    ctx.logger.info(f"ack from {sender} for {msg.acknowledged_msg_id}")
+    ctx.logger.debug(f"ack from {sender} for {msg.acknowledged_msg_id}")
 
 
 agent.include(chat, publish_manifest=True)

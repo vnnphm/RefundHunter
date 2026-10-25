@@ -167,7 +167,8 @@ _slots = asyncio.Semaphore(MAX_JOBS)
 @agent.on_message(model=ClaimRequest, replies=ClaimDraft)
 async def on_claim_request(ctx: Context, sender: str, req: ClaimRequest):
     if COORDINATOR_ADDRESS and sender != COORDINATOR_ADDRESS:  # each draft is an asi1 call
-        ctx.logger.warning(f"ignoring ClaimRequest from unexpected sender {sender}")
+        ctx.logger.warning(f"refusing ClaimRequest from {sender}: not our coordinator")
+        await ctx.send(sender, ClaimDraft(item_id=req.item_id, user_id=req.user_id, ok=False, error="not allowed"))
         return
     async with _slots:
         await answer_claim(ctx, sender, req)

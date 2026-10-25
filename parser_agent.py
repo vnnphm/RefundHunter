@@ -18,6 +18,14 @@ from models import ParsedReceipt, Receipt, ReceiptItem
 
 load_dotenv()
 
+# Only our coordinator may use this agent: anyone on Agentverse can message it, and each request costs
+# an ASI:One (asi1) call. Empty = answer everyone (local testing).
+COORDINATOR_ADDRESS = os.getenv("COORDINATOR_ADDRESS", "").strip()
+
+
+def allowed(sender: str) -> bool:
+    return not COORDINATOR_ADDRESS or sender == COORDINATOR_ADDRESS
+
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # ASI:One's limit per image
 DOWNLOAD_TIMEOUT_S = 30
 BODY_LIMIT = 8000
@@ -186,6 +194,11 @@ async def parse(receipt: Receipt, log=print) -> ParsedReceipt:
 
 @agent.on_message(model=Receipt, replies=ParsedReceipt)
 async def on_receipt(ctx: Context, sender: str, receipt: Receipt):
+    if not allowed(sender):
+        ctx.logger.warning(f"refusing Receipt from {sender}: not our coordinator")
+        await ctx.send(sender, ParsedReceipt(message_id=receipt.message_id, user_id=receipt.user_id, ok=False,
+                                             error="not allowed"))
+        return
     start = time.monotonic()
     kind = "photo" if receipt.image_url else "email"
     try:

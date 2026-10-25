@@ -197,6 +197,7 @@ class ClaimDraft(Model):      # claim agent -> coordinator
 
 **Agent-to-agent**
 - Worker agents use `@agent.on_message(model=X, replies=Y)` with the models in `models.py`, not the chat protocol.
+- **Paid workers answer only the coordinator.** Anyone on Agentverse can message an agent, so the price agent (Bright Data credits), parser and claim agents (asi1 calls) check `sender == COORDINATOR_ADDRESS` and reply `ok=False, error="not allowed"` to anyone else, before doing any work. Empty `COORDINATOR_ADDRESS` = answer everyone (local testing). The policy agent is a free rule table and answers anyone.
 - The chat never waits on a scrape. The coordinator replies "Checking price…" right away and sends the result card when `PriceResult` arrives.
 
 **Interactive Cards**

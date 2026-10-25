@@ -1,4 +1,4 @@
-"""ASI:One (asi1) JSON calls shared by the parser and policy agents."""
+"""ASI:One (asi1) JSON calls, used by the parser agent to read receipts."""
 import json
 import os
 

@@ -8,6 +8,7 @@ Turns a receipt into data Refund Hunter can track: the store, purchase date, ord
 - **Receipt photos and screenshots** uploaded in ASI:One, read by ASI:One's own model (asi1). No other AI provider.
 - **Order emails** imported with Connect Gmail: the same prompt reads the email text, so photos and emails give the same result.
 - Leaves out tax, shipping, discounts and totals, and never guesses a price it can't read. Only the parsed fields are kept, never the image or the email.
+- Works only for Refund Hunter's coordinator: requests from other agents get "not allowed".
 
 ## How to use it
 
