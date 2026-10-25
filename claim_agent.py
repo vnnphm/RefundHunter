@@ -23,10 +23,13 @@ COORDINATOR_ADDRESS = os.getenv("COORDINATOR_ADDRESS", "").strip()  # only it ma
 
 ACTIONS = ("price_adjustment", "goodwill_credit", "return_rebuy")
 # Used when ClaimRequest.action is empty (no policy agent yet) or "none".
-DEFAULT_ACTION = {"amazon": "goodwill_credit", "walmart": "return_rebuy", "other": "price_adjustment"}
+DEFAULT_ACTION = {"amazon": "goodwill_credit", "walmart": "return_rebuy", "target": "price_adjustment",
+                  "bestbuy": "price_adjustment", "other": "price_adjustment"}
 DEFAULT_WHERE = {
     "amazon": "Amazon customer service chat: https://www.amazon.com/gp/help/customer/contact-us",
     "walmart": "Walmart customer care chat: https://www.walmart.com/help",
+    "target": "Target guest services chat: https://help.target.com",
+    "bestbuy": "Best Buy chat: https://www.bestbuy.com/site/customer-service",
     "other": "the store's customer service chat or email",
 }
 # What the message asks for, in the shopper's words.
@@ -72,7 +75,7 @@ def pick_action(req: ClaimRequest) -> str:
 
 
 def store_name(store: str) -> str:
-    return store.title() if store in ("amazon", "walmart") else "your store"
+    return {"amazon": "Amazon", "walmart": "Walmart", "target": "Target", "bestbuy": "Best Buy"}.get(store, "your store")
 
 
 def nice_date(value: str) -> str:

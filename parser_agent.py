@@ -21,7 +21,7 @@ load_dotenv()
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # ASI:One's limit per image
 DOWNLOAD_TIMEOUT_S = 30
 BODY_LIMIT = 8000
-STORES = ("amazon", "walmart", "other")
+STORES = ("amazon", "walmart", "target", "bestbuy", "other")
 
 SEED = os.getenv("PARSER_AGENT_SEED", "")
 if not SEED or SEED.startswith("change-me"):
@@ -37,7 +37,7 @@ agent = Agent(
 
 PROMPT = """You read purchase receipts: a photo of a paper receipt, or the text of an order email.
 Return only JSON with these fields:
-- store: "amazon" or "walmart" if the purchase was from that store, otherwise "other"
+- store: "amazon", "walmart", "target" or "bestbuy" (Best Buy) if the purchase was from that store, otherwise "other"
 - purchase_date: the purchase or order date as YYYY-MM-DD, or "" if not shown
 - order_number: the order or transaction number, or "" if not shown
 - items: one entry per product bought, each with
