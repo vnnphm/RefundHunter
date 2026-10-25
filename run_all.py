@@ -2,6 +2,7 @@
 
 Creates .env from .env.example if needed, fills in missing seeds and agent addresses,
 then runs the price, policy, parser and coordinator agents together. Ctrl+C stops them all.
+A worker whose address in .env doesn't come from its seed here is a teammate's agent: it isn't started.
 """
 import os
 import secrets
@@ -28,12 +29,14 @@ AGENTS = [
 KEYS = ["BRIGHTDATA_API_TOKEN", "ASI_ONE_API_KEY"]
 
 
-def prepare_env() -> dict[str, str]:
-    """Seeds and addresses in .env, so nobody has to copy them by hand. Never prints a seed."""
+def prepare_env() -> tuple[dict[str, str], set[str]]:
+    """Seeds and addresses in .env, so nobody has to copy them by hand. Never prints a seed.
+    Also returns the workers that run elsewhere (their address isn't this seed's)."""
     if not ENV.exists():
         shutil.copy(EXAMPLE, ENV)
         print("Created .env from .env.example")
     env = dotenv_values(ENV)
+    remote = set()
     for name, _, seed_key, addr_key in AGENTS:
         seed = env.get(seed_key) or ""
         if not seed or seed.startswith("change-me"):
@@ -44,11 +47,13 @@ def prepare_env() -> dict[str, str]:
         current = env.get(addr_key) or ""
         if not current:
             set_key(ENV, addr_key, address, quote_mode="never")
+        elif current != address and name != "coordinator":
+            remote.add(name)
+            print(f"Using the {name} agent at {addr_key} in .env (a teammate's), so not starting one here. "
+                  f"To run your own instead, clear the value after {addr_key}= in .env, save, and run this again.")
         elif current != address:
-            print(f"Note: {addr_key} in .env doesn't match this {name} agent's seed, so messages go to that other "
-                  f"address. To use the {name} agent started here, clear the value after {addr_key}= in .env, "
-                  "save, and run this again.")
-    return dotenv_values(ENV)
+            print(f"Note: {addr_key} in .env isn't this coordinator's address; server.py sends emails there.")
+    return dotenv_values(ENV), remote
 
 
 def relay(name: str, proc: subprocess.Popen):
@@ -59,20 +64,25 @@ def relay(name: str, proc: subprocess.Popen):
 
 def main():
     sys.stdout.reconfigure(errors="replace")  # an odd character in a log line never stops the relay
-    env = prepare_env()
+    env, remote = prepare_env()
     missing = [k for k in KEYS if not (env.get(k) or os.getenv(k))]
     if missing:
         sys.exit(f"Paste your {' and '.join(missing)} into .env (open it in VS Code), save, then run this again.")
 
     print("\nAgent addresses (also saved in .env):")
-    for name, _, seed_key, _ in AGENTS:
-        print(f"  {name:<11} {Identity.from_seed(env[seed_key], 0).address}")
-    print("\nFor each agent, open its 'Agent inspector available at' link below in Chrome or Brave,"
+    for name, _, seed_key, addr_key in AGENTS:
+        if name in remote:
+            print(f"  {name:<11} {env[addr_key]}  (teammate's, not started here)")
+        else:
+            print(f"  {name:<11} {Identity.from_seed(env[seed_key], 0).address}")
+    print("\nFor each agent started here, open its 'Agent inspector available at' link below in Chrome or Brave,"
           "\nallow Local Network Access, then Connect -> Mailbox -> Finish. Ctrl+C stops everything.\n")
 
     procs = []
     try:
         for name, script, _, _ in AGENTS:
+            if name in remote:
+                continue
             if name == "coordinator":
                 time.sleep(3)  # let the workers come up first
             proc = subprocess.Popen([sys.executable, "-u", script], stdout=subprocess.PIPE,
