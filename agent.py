@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
 from dotenv import load_dotenv
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
@@ -442,6 +443,11 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
             headline = (f"Good news: {item['name'] or 'an item you bought'} dropped ${drop:.2f} below what you paid!"
                         if quiet["by"] == "watch" else f"Price dropped ${drop:.2f}!")
             ctx.logger.info(f"{quiet['by']} re-check {item['item_id']}: drop ${drop:.2f}, telling {user}")
+            if quiet["by"] == "watch":  # ASI:One may hand this to the user's assistant; ntfy reaches the phone
+                await push_phone(ctx, f"{item['name'] or 'An item you bought'} dropped ${drop:.2f}",
+                                 f"Now ${item['current_price']:.2f} at {shop_name(item['store']) or 'the store'}, "
+                                 f"you paid ${item['price_paid']:.2f}. Open ASI:One and say "
+                                 f"\"@refundhunter show my items\" to claim it.")
             await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
             await ask_policy(ctx, item)
         await batch_done(ctx, quiet, dropped=tell)
@@ -453,6 +459,26 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
 
 
 # ---- Re-checking prices: "Check again", "check my prices", and the price watch ----
+
+# Phone push for price-watch alerts via ntfy.sh (free; the ntfy app subscribes to this topic). The topic name
+# is the only access control, so it's a long random string kept in .env. Only the item name and amounts are sent.
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+
+
+async def push_phone(ctx: Context, title: str, message: str):
+    """Best effort: a failed push is logged and never stops the chat message."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # JSON to the server root (not headers) so any product name, dashes and all, comes through intact.
+            r = await client.post(NTFY_SERVER, json={"topic": NTFY_TOPIC, "title": title[:120], "message": message,
+                                                     "tags": ["moneybag"], "priority": 4})
+        ctx.logger.info(f"phone push {'sent' if r.status_code < 300 else f'failed ({r.status_code})'}")
+    except httpx.HTTPError as e:
+        ctx.logger.warning(f"phone push failed: {type(e).__name__}")  # never the topic: it's the access key
+
 
 WATCH_HOURS = float(os.getenv("PRICE_WATCH_HOURS", "6") or 0)  # re-check items older than this; 0 = off
 WATCH_TICK_S = 600  # how often the watch looks for items due
