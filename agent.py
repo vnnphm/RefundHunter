@@ -3,7 +3,8 @@ import json
 import os
 import re
 import sys
-from datetime import date, datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -14,8 +15,9 @@ from uagents_core.contrib.protocols.chat import (
     ResourceContent, StartSessionContent, TextContent, chat_protocol_spec,
 )
 
+import gmail
 import store
-from models import ParsedReceipt, PolicyResult, PriceResult, Receipt, TrackItem
+from models import FindProduct, FindResult, ParsedReceipt, PriceResult, ProductMatch, Receipt, TrackItem
 
 load_dotenv()
 
@@ -23,8 +25,6 @@ load_dotenv()
 PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 # Empty until the parser agent is running: the coordinator mocks ParsedReceipt instead.
 PARSER_AGENT_ADDRESS = os.getenv("PARSER_AGENT_ADDRESS", "").strip()
-# Empty until the policy agent is running: cards just leave out the refund policy rows.
-POLICY_AGENT_ADDRESS = os.getenv("POLICY_AGENT_ADDRESS", "").strip()
 # The email webhook (server.py); only it may send us Receipts.
 SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "").strip()
 # Shared Pipedream address users forward order emails to.
@@ -45,7 +45,7 @@ chat = Protocol(spec=chat_protocol_spec)
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 ITEM_ID_RE = re.compile(r"\bit_[0-9a-f]{8}\b")
 ACTION_RE = re.compile(r"\b(submit_item|add_item|upload_receipt|list_items|view_item|link_email"
-                       r"|check_receipts|track_receipt|dismiss_receipt)\b")
+                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt)\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -76,6 +76,20 @@ def accepts_attachments() -> ChatMessage:
 
 # ---- Cards -------------------------------------------------------------------
 
+_next_send: dict[str, float] = {}  # user -> earliest time (monotonic) for their next message
+SEND_GAP_S = 1.5  # ASI:One answers 429 to messages sent back-to-back, and drops them
+
+
+async def say(ctx: Context, user: str, msg: ChatMessage):
+    """Send a chat message to a user, spaced out so ASI:One doesn't rate-limit it."""
+    now = time.monotonic()
+    slot = max(now, _next_send.get(user, 0))
+    _next_send[user] = slot + SEND_GAP_S
+    if slot > now:
+        await asyncio.sleep(slot - now)
+    await ctx.send(user, msg)
+
+
 def new_item_id() -> str:
     return "it_" + uuid4().hex[:8]
 
@@ -98,8 +112,8 @@ def menu_card(pending: int = 0) -> dict:
             {"type": "group", "direction": "row", "gap": 8, "children": [
                 {"type": "button", "label": "My items",
                  "action": {"selection": {"action": "list_items"}}},
-                {"type": "button", "label": "Link my email",
-                 "action": {"selection": {"action": "link_email"}}},
+                {"type": "button", "label": "Connect Gmail",
+                 "action": {"selection": {"action": "connect_gmail"}}},
             ]},
             *review,
         ],
@@ -107,7 +121,7 @@ def menu_card(pending: int = 0) -> dict:
 
 
 def add_item_form(item_id: str, product_url: str = "", price_paid: float | None = None,
-                  name: str = "", purchase_date: str = "") -> dict:
+                  name: str = "") -> dict:
     """Asks only for what we don't already know: the link, the price paid, the name."""
     fields = [] if product_url else [
         {"name": "product_url", "kind": "text", "label": "Product link", "required": True}]
@@ -124,8 +138,6 @@ def add_item_form(item_id: str, product_url: str = "", price_paid: float | None 
         selection["price_paid"] = price_paid
     if name:
         selection["name"] = name
-    if purchase_date:
-        selection["purchase_date"] = purchase_date
     return {
         "title": f"Track: {name[:60]}" if name else "Track an item",
         "fields": fields,
@@ -163,42 +175,12 @@ def receipt_review(rec: dict, mock: bool) -> dict:
     }
 
 
-def return_by(item: dict) -> date | None:
-    """Last day to return: purchase date (else the day it was added) + the store's window."""
-    if item["return_days"] is None:
-        return None
-    try:
-        bought = date.fromisoformat(item["purchase_date"] or item["added_at"][:10])
-    except ValueError:
-        return None
-    return bought + timedelta(days=item["return_days"])
-
-
-def policy_rows(item: dict) -> list[dict]:
-    """Refund policy rows for the detail card; none until the policy agent has answered."""
-    rows = []
-    deadline = return_by(item)
-    if item["returnable"] == 0:
-        rows.append({"label": "Returns", "value": "Not returnable"})
-    elif deadline:
-        passed = " (passed)" if deadline < datetime.now(timezone.utc).date() else ""
-        rows.append({"label": "Return by", "value": deadline.isoformat() + passed})
-    if item["price_adjust_days"] == 0:
-        rows.append({"label": "Price adjustment", "value": "Not offered"})
-    elif item["price_adjust_days"]:
-        rows.append({"label": "Price adjustment", "value": f"Within {item['price_adjust_days']} days"})
-    if item["policy_summary"]:
-        rows.append({"label": "Policy", "value": item["policy_summary"][:200]})
-    return rows
-
-
 def price_detail(item: dict, mock: bool) -> dict:
     drop = item["price_paid"] - item["current_price"]
     rows = [
         {"label": "You paid", "value": f"${item['price_paid']:.2f}"},
         {"label": "Price now", "value": f"${item['current_price']:.2f}"},
         {"label": "Result", "value": f"Dropped ${drop:.2f}" if drop > 1 else "No change"},
-        *policy_rows(item),
         {"label": "Store", "value": item["store"].title()},
         {"label": "Checked", "value": item["checked_at"][:16].replace("T", " ") + " UTC"},
     ]
@@ -239,6 +221,30 @@ def items_carousel(items: list[dict]) -> dict:
             "items": tiles}
 
 
+SEARCHABLE = ("amazon", "walmart")  # stores the price agent can search by item name
+
+
+def match_carousel(item_id: str, name: str, price_paid: float, matches: list, shop: str = "amazon") -> dict:
+    """Store search results for a receipt item; tapping one tracks it like a filled-in form."""
+    tiles = []
+    for m in matches:
+        if m.price and price_paid - m.price > 1:
+            badge = {"label": f"${price_paid - m.price:.2f} less now", "variant": "success"}
+        else:
+            badge = {"label": shop.title(), "variant": "info"}
+        tiles.append({
+            "id": m.product_url.rsplit("/", 1)[-1],
+            "title": m.name[:80],
+            "subtitle": m.product_url.rsplit("/", 1)[-1],  # ASIN / Walmart item id, to tell look-alikes apart
+            "badges": [badge],
+            "secondary_text": f"Now ${m.price:.2f}" if m.price else "Price unknown",
+            "primary_cta": {"label": "This one", "selection": {
+                "action": "submit_item", "item_id": item_id, "product_url": m.product_url,
+                "price_paid": price_paid, "name": name}},
+        })
+    return {"title": f"Which one is {name[:50]}?", "subtitle": f"You paid ${price_paid:.2f}", "items": tiles}
+
+
 # ---- Parsing -----------------------------------------------------------------
 
 def parse_selection(text: str) -> dict:
@@ -270,9 +276,11 @@ def parse_selection(text: str) -> dict:
         sel["action"] = "submit_item"
     elif "link" in lower and ("email" in lower or "email" in sel):
         sel["action"] = "link_email"
+    elif re.search(r"\b(gmail|connect)\b", lower):
+        sel["action"] = "connect_gmail"
     elif re.search(r"\brec(ei|ie)pts\b", lower):  # "any new receipts?" (or "reciepts")
         sel["action"] = "check_receipts"
-    elif re.search(r"\b(approved?|confirm(ed)?|track (these|this|them|it))\b", lower) and re.search(r"rec(ei|ie)pt", lower):
+    elif re.search(r"\b(approved?|confirm(ed)?|track(ing)? (these|this|them|it))\b", lower) and re.search(r"rec(ei|ie)pt", lower):
         sel["action"] = "track_receipt"
     elif re.search(r"\b(dismiss(ed)?|reject(ed)?|not now|cancel(led)?)\b", lower):
         sel["action"] = "dismiss_receipt"
@@ -351,14 +359,14 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
     user = item["user_id"]
     if not result.ok or not result.current_price or result.current_price <= 0:
         ctx.logger.info(f"price check failed for {result.item_id}: {result.error}")
-        await ctx.send(user, reply("Couldn't get the current price for that item. Try again later."))
+        await say(ctx, user, reply("Couldn't get the current price for that item. Try again later."))
         return
     store.save_price(result.item_id, result.current_price,
                      result.checked_at or datetime.now(timezone.utc).isoformat(), result.title or "")
     item = store.get_item(result.item_id)
     drop = item["price_paid"] - item["current_price"]
     headline = f"Price dropped ${drop:.2f}!" if drop > 1 else "No price drop yet."
-    await ctx.send(user, card(headline, "detail", price_detail(item, mock)))
+    await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
 
 
 @agent.on_message(model=PriceResult)
@@ -367,28 +375,6 @@ async def on_price_result(ctx: Context, sender: str, msg: PriceResult):
         ctx.logger.warning(f"ignoring PriceResult from unexpected sender {sender}")
         return
     await show_price(ctx, msg)
-
-
-# ---- Refund policy -----------------------------------------------------------
-
-@agent.on_message(model=PolicyResult)
-async def on_policy_result(ctx: Context, sender: str, msg: PolicyResult):
-    if not POLICY_AGENT_ADDRESS or sender != POLICY_AGENT_ADDRESS:
-        ctx.logger.warning(f"ignoring PolicyResult from unexpected sender {sender}")
-        return
-    item = store.get_item(msg.item_id)
-    if item is None:
-        ctx.logger.warning(f"policy for unknown item {msg.item_id}")
-        return
-    if not msg.ok:  # the price card still stands on its own
-        ctx.logger.info(f"policy check failed for {msg.item_id}: {msg.error}")
-        return
-    store.save_policy(msg.item_id, msg.returnable, msg.return_days, msg.price_adjust_days, msg.summary)
-    item = store.get_item(msg.item_id)
-    if item["current_price"] is None:
-        return  # the price card, when it comes, shows the policy rows
-    await ctx.send(item["user_id"], card(msg.summary or "Checked the refund policy.", "detail",
-                                         price_detail(item, mock=not PRICE_AGENT_ADDRESS)))
 
 
 # ---- Receipts ----------------------------------------------------------------
@@ -408,21 +394,34 @@ def mock_parse(r: Receipt) -> ParsedReceipt:
                                  "product_url": url}])
 
 
+_gmail_card_at: dict[str, float] = {}  # user -> when a Gmail import last pushed a review card
+GMAIL_BURST_S = 120  # ASI:One rate-limits (429) a burst of cards; the rest wait as pending
+
+
 async def show_parsed(ctx: Context, parsed: ParsedReceipt, mock: bool = False):
     user = parsed.user_id
     items = [{"name": it.name, "price_paid": it.price_paid, "product_url": it.product_url}
              for it in parsed.items if it.price_paid > 0] if parsed.ok else []
     if not items:
         ctx.logger.info(f"receipt {parsed.message_id} unreadable: {parsed.error or 'no priced items'}")
-        await ctx.send(user, reply("I got a receipt but couldn't read the items on it. You can add them by hand."))
+        if parsed.message_id.startswith("photo_"):  # emails arrive via a filter: stay quiet on non-receipts
+            await say(ctx, user, reply("I got a receipt but couldn't read the items on it. You can add them by hand."))
         return
     if not store.save_receipt(parsed.message_id, user, parsed.store, parsed.purchase_date,
                               parsed.order_number, items):
         ctx.logger.info(f"receipt {parsed.message_id} already seen")
         return
     ctx.logger.info(f"receipt {parsed.message_id}: {len(items)} item(s) for {user}")
-    await ctx.send(user, card("I found a new receipt. Want me to track it?", "review",
-                              receipt_review(store.get_receipt(parsed.message_id), mock)))
+    text = "I found a new receipt. Want me to track it?"
+    if parsed.message_id.startswith("gm_"):  # Gmail connect imports several at once: one card, rest pending
+        if time.time() - _gmail_card_at.get(user, 0) < GMAIL_BURST_S:
+            ctx.logger.info(f"receipt {parsed.message_id} saved as pending (Gmail import)")
+            return
+        _gmail_card_at[user] = time.time()
+        text = "I found a receipt in your Gmail. Want me to track it? (Ask \"any new receipts?\" for the rest.)"
+    rec = store.get_receipt(parsed.message_id)
+    await say(ctx, user, card(text, "review", receipt_review(rec, mock)))
+    await presearch(ctx, rec)
 
 
 @agent.on_message(model=Receipt)
@@ -431,7 +430,11 @@ async def on_receipt(ctx: Context, sender: str, msg: Receipt):
     if not SERVER_ADDRESS or sender != SERVER_ADDRESS:
         ctx.logger.warning(f"ignoring Receipt from unexpected sender {sender}")
         return
-    user = store.user_for_email(msg.sender)
+    if msg.user_id:  # Gmail connect: the user signed in from our link, so we know whose it is
+        user = msg.user_id
+        store.link_email(msg.sender, user)  # later forwards from this address work too
+    else:
+        user = store.user_for_email(msg.sender)
     if user is None:
         ctx.logger.info(f"receipt {msg.message_id} from an unlinked email (@{msg.sender.split('@')[-1]})")
         return
@@ -451,30 +454,101 @@ async def on_parsed_receipt(ctx: Context, sender: str, msg: ParsedReceipt):
     await show_parsed(ctx, msg)
 
 
+@agent.on_message(model=FindResult)
+async def on_find_result(ctx: Context, sender: str, msg: FindResult):
+    """Search results for a receipt item: let the user pick, or ask for the link."""
+    if not PRICE_AGENT_ADDRESS or sender != PRICE_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring FindResult from unexpected sender {sender}")
+        return
+    key = f"find:{msg.item_id}"
+    wanted = ctx.storage.get(key)
+    if wanted is None:
+        ctx.logger.info(f"search {msg.item_id} already handled")
+        return
+    if not wanted.get("approved", True):  # searched early: hold the matches until the user approves
+        wanted.update(done=True, ok=msg.ok, error=msg.error, matches=[m.dict() for m in msg.matches])
+        ctx.storage.set(key, wanted)
+        ctx.logger.info(f"search {msg.item_id} ready before approve: {len(msg.matches)} match(es)")
+        return
+    ctx.storage.remove(key)
+    await show_matches(ctx, msg.user_id, msg.item_id, wanted, msg.ok, msg.matches, msg.error)
+
+
+async def show_matches(ctx: Context, user: str, item_id: str, wanted: dict, ok: bool,
+                       matches: list, error: str | None):
+    name, paid, shop = wanted["name"], wanted["price_paid"], wanted.get("store", "amazon")
+    form = add_item_form(item_id, "", paid, name)
+    if ok and matches:
+        ctx.logger.info(f"search {item_id}: {len(matches)} match(es) for {user}")
+        await say(ctx, user, card(f"Which one did you buy? You paid ${paid:.2f}.", "carousel",
+                                  match_carousel(item_id, name, paid, matches, shop)))
+        await say(ctx, user, card("Not listed? Paste the link.", "form", form))
+    else:
+        ctx.logger.info(f"search {item_id} found nothing: {error or 'no matches'}")
+        await say(ctx, user, card(f"I couldn't find {name[:60]} on {shop.title()}. What's the link?",
+                                  "form", form))
+
+
+def searchable(rec: dict, it: dict) -> bool:
+    return bool(PRICE_AGENT_ADDRESS) and rec["store"] in SEARCHABLE and not valid_url(it["product_url"])
+
+
+async def start_search(ctx: Context, user: str, it: dict, shop: str, approved: bool) -> str:
+    item_id = new_item_id()
+    ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"],
+                                        "store": shop, "approved": approved})
+    await ctx.send(PRICE_AGENT_ADDRESS, FindProduct(item_id=item_id, user_id=user, query=it["name"], store=shop))
+    return item_id
+
+
+async def presearch(ctx: Context, rec: dict):
+    """Search while the user reads the review card (Walmart takes about a minute), so Approve is quick."""
+    key = f"pre:{rec['message_id']}"
+    todo = [(i, it) for i, it in enumerate(rec["items"]) if searchable(rec, it)]
+    if not todo or ctx.storage.has(key):
+        return
+    ctx.storage.set(key, {str(i): await start_search(ctx, rec["user_id"], it, rec["store"], approved=False)
+                          for i, it in todo})
+
+
+def forget_presearch(ctx: Context, message_id: str):
+    for item_id in (ctx.storage.get(f"pre:{message_id}") or {}).values():
+        ctx.storage.remove(f"find:{item_id}")
+    ctx.storage.remove(f"pre:{message_id}")
+
+
 def find_receipt(sender: str, sel: dict, text: str) -> dict | None:
     """The receipt a review-card button refers to, even when the planner relays it as prose."""
     rec = store.get_receipt(sel.get("message_id", ""))
     if rec and rec["user_id"] == sender:
         return rec
     pending = store.pending_receipts(sender)
-    return next((r for r in pending if r["message_id"] in text), pending[0] if pending else None)
+    named = next((r for r in pending if r["message_id"] in text), None)
+    # Planner prose often drops the id: guess only when one receipt is waiting, never pick among several.
+    return named or (pending[0] if len(pending) == 1 else None)
+
+
+async def show_pending(ctx: Context, sender: str, intro: str = "Want me to track this?"):
+    pending = store.pending_receipts(sender)
+    if not pending:
+        await say(ctx, sender, reply("No new receipts right now."))
+    for rec in pending[:3]:
+        await say(ctx, sender, card(intro, "review", receipt_review(rec, mock=not PARSER_AGENT_ADDRESS)))
+        await presearch(ctx, rec)
 
 
 # ---- Handlers ----------------------------------------------------------------
 
 async def track_new_item(ctx: Context, sender: str, url: str, price: float, name: str,
-                         item_id: str | None = None, purchase_date: str = ""):
+                         item_id: str | None = None):
     item_id = item_id or new_item_id()
     shop = store_for(url)
-    if not store.add_item(item_id, sender, url, shop, price, name, purchase_date):
-        await ctx.send(sender, reply("That item is already being tracked."))
+    if not store.add_item(item_id, sender, url, shop, price, name):
+        await say(ctx, sender, reply("That item is already being tracked."))
         return
     ctx.logger.info(f"saved {item_id} ({shop}) for {sender}")
-    await ctx.send(sender, reply(f"Tracking it: paid ${price:.2f} at {shop.title()}. Checking price…"))
-    req = TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop)
-    if POLICY_AGENT_ADDRESS:  # first: the mocked price below waits a moment
-        await ctx.send(POLICY_AGENT_ADDRESS, req)
-    await request_price(ctx, req)
+    await say(ctx, sender, reply(f"Tracking it: paid ${price:.2f} at {shop.title()}. Checking price…"))
+    await request_price(ctx, TrackItem(item_id=item_id, user_id=sender, product_url=url, store=shop))
 
 
 async def handle_text(ctx: Context, sender: str, text: str):
@@ -486,84 +560,111 @@ async def handle_text(ctx: Context, sender: str, text: str):
         price = parse_price(sel.get("price_paid"))
         item_id = sel.get("item_id") or new_item_id()
         if not valid_url(url) or price is None:
-            await ctx.send(sender, card(
+            await say(ctx, sender, card(
                 "I need a full product link (starting with https://) and the price you paid.",
                 "form", add_item_form(item_id, url if valid_url(url) else "")))
             return
-        bought = str(sel.get("purchase_date") or "")
-        await track_new_item(ctx, sender, url, price, str(sel.get("name") or "").strip(), item_id,
-                             bought if re.fullmatch(r"\d{4}-\d{2}-\d{2}", bought) else "")
+        await track_new_item(ctx, sender, url, price, str(sel.get("name") or "").strip(), item_id)
     elif action == "link_email":
         email = (sel.get("email") or "").strip()
         if not EMAIL_RE.fullmatch(email):
-            await ctx.send(sender, card("Which email do you get order confirmations at?", "form",
+            await say(ctx, sender, card("Which email do you get order confirmations at?", "form",
                                         link_email_form()))
             return
         store.link_email(email, sender)
         ctx.logger.info(f"linked an email (@{email.split('@')[-1]}) to {sender}")
         where = (f"Forward order emails from {email} to {RECEIPT_INBOX} and I'll pick them up."
                  if RECEIPT_INBOX else "Email forwarding isn't set up yet; check back soon.")
-        await ctx.send(sender, reply(f"Linked {email}. {where}"))
-    elif action == "check_receipts":
-        pending = store.pending_receipts(sender)
-        if not pending:
-            await ctx.send(sender, reply("No new receipts right now."))
+        await say(ctx, sender, reply(f"Linked {email}. {where}"))
+    elif action == "connect_gmail":
+        if not gmail.configured():
+            await say(ctx, sender, reply("Gmail connect isn't set up yet. You can upload a receipt photo instead."))
             return
-        for rec in pending[:3]:
-            await ctx.send(sender, card("Want me to track this?", "review",
-                                        receipt_review(rec, mock=not PARSER_AGENT_ADDRESS)))
+        ctx.logger.info(f"sent a Gmail connect link to {sender}")
+        await say(ctx, sender, reply(
+            f"Connect Gmail here: {gmail.connect_link(sender)}\n\n"
+            "I'll read order emails from the last 30 days once (read-only), show each receipt here for you "
+            "to review, and keep nothing else from your inbox. The link works for 15 minutes."))
+    elif action == "check_receipts":
+        await show_pending(ctx, sender)
     elif action == "track_receipt":
         rec = find_receipt(sender, sel, text)
+        if rec is None and store.pending_receipts(sender):
+            await show_pending(ctx, sender, "Which receipt? Tap Approve on the one you mean.")
+            return
+        if rec and rec["status"] == "tracked":  # a second tap, or the planner resending the click
+            await say(ctx, sender, reply("Already on it: I'm tracking that receipt. If I'm still looking "
+                                         "up an item, its matches will show up here in a minute."))
+            return
         if rec is None or rec["status"] != "pending":
-            await ctx.send(sender, reply("I don't have a receipt waiting for you to confirm."))
+            await say(ctx, sender, reply("I don't have a receipt waiting for you to confirm."))
             return
         store.set_receipt_status(rec["message_id"], "tracked")
-        for it in rec["items"]:
+        early = ctx.storage.get(f"pre:{rec['message_id']}") or {}
+        ctx.storage.remove(f"pre:{rec['message_id']}")
+        for i, it in enumerate(rec["items"]):
             if valid_url(it["product_url"]):
-                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"],
-                                     purchase_date=rec["purchase_date"])
+                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"])
+            elif searchable(rec, it):  # search for it, user picks
+                item_id = early.get(str(i))
+                wanted = ctx.storage.get(f"find:{item_id}") if item_id else None
+                shop = rec["store"].title()
+                if wanted and wanted.get("done"):  # the early search already finished
+                    ctx.storage.remove(f"find:{item_id}")
+                    await show_matches(ctx, sender, item_id, wanted, wanted["ok"],
+                                       [ProductMatch(**m) for m in wanted["matches"]], wanted.get("error"))
+                elif wanted:  # still running: show the matches when they arrive
+                    wanted["approved"] = True
+                    ctx.storage.set(f"find:{item_id}", wanted)
+                    await say(ctx, sender, reply(f"Still looking up {it['name'][:60]} on {shop}…"))
+                else:
+                    await say(ctx, sender, reply(f"Looking up {it['name'][:60]} on {shop}…"))
+                    await start_search(ctx, sender, it, rec["store"], approved=True)
             else:  # paper receipts and some emails have no product link
-                await ctx.send(sender, card(f"What's the product link for {it['name'][:60]}?", "form",
-                                            add_item_form(new_item_id(), "", it["price_paid"], it["name"],
-                                                          rec["purchase_date"])))
+                await say(ctx, sender, card(f"What's the product link for {it['name'][:60]}?", "form",
+                                            add_item_form(new_item_id(), "", it["price_paid"], it["name"])))
     elif action == "dismiss_receipt":
         rec = find_receipt(sender, sel, text)
+        if rec is None and store.pending_receipts(sender):
+            await show_pending(ctx, sender, "Which receipt? Tap Not now on the one you mean.")
+            return
         if rec and rec["status"] == "pending":
             store.set_receipt_status(rec["message_id"], "dismissed")
-        await ctx.send(sender, reply("Okay, I won't track that receipt."))
+            forget_presearch(ctx, rec["message_id"])
+        await say(ctx, sender, reply("Okay, I won't track that receipt."))
     elif action == "add_item":
         url = sel.get("product_url", "") if valid_url(sel.get("product_url", "")) else ""
-        await ctx.send(sender, card(
+        await say(ctx, sender, card(
             "Got the link. What did you pay?" if url else "Add the item you bought.",
             "form", add_item_form(new_item_id(), url)))
     elif action == "list_items":
         items = store.list_items(sender)
         if not items:
-            await ctx.send(sender, card("You're not tracking anything yet.", "custom",
+            await say(ctx, sender, card("You're not tracking anything yet.", "custom",
                                         menu_card(len(store.pending_receipts(sender)))))
             return
-        await ctx.send(sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
+        await say(ctx, sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
     elif action == "view_item":
         item = store.get_item(sel.get("item_id", ""))
         if item is None or item["user_id"] != sender:
-            await ctx.send(sender, reply("I couldn't find that item."))
+            await say(ctx, sender, reply("I couldn't find that item."))
         elif item["current_price"] is None:
-            await ctx.send(sender, reply("Still checking the price on that one. Try again in a moment."))
+            await say(ctx, sender, reply("Still checking the price on that one. Try again in a moment."))
         else:
-            await ctx.send(sender, card(item["name"] or "Your item", "detail",
+            await say(ctx, sender, card(item["name"] or "Your item", "detail",
                                         price_detail(item, mock=not PRICE_AGENT_ADDRESS)))
     elif action == "upload_receipt":
-        await ctx.send(sender, reply(
+        await say(ctx, sender, reply(
             "Attach a photo of your receipt with the paperclip button and send it."))
     elif URL_RE.search(text):
         # A pasted link: skip straight to the price question.
         url = URL_RE.search(text).group(0).rstrip(".,)")
-        await ctx.send(sender, card("Got the link. What did you pay?", "form",
+        await say(ctx, sender, card("Got the link. What did you pay?", "form",
                                     add_item_form(new_item_id(), url)))
     else:
         n = len(store.pending_receipts(sender))
         nudge = f" You have {n} new receipt{'s' if n != 1 else ''} to review." if n else ""
-        await ctx.send(sender, card(
+        await say(ctx, sender, card(
             "Hi! Add an item by link, or upload a receipt photo." + nudge, "custom", menu_card(n)))
 
 
@@ -575,7 +676,7 @@ async def on_message(ctx: Context, sender: str, msg: ChatMessage):
     for item in msg.content:
         if isinstance(item, StartSessionContent):
             ctx.logger.info(f"session started by {sender}")
-            await ctx.send(sender, accepts_attachments())
+            await say(ctx, sender, accepts_attachments())
         elif isinstance(item, TextContent):
             ctx.logger.info(f"text from {sender}: {EMAIL_RE.sub('<email>', item.text[:120])}")
             if not has_photo:  # a caption on a photo gets one reply, below
@@ -584,20 +685,22 @@ async def on_message(ctx: Context, sender: str, msg: ChatMessage):
             # Never log the URL: it can be a signed link.
             url = image_url(item)
             if not url:
-                await ctx.send(sender, reply("Couldn't read that attachment, please re-upload it."))
+                await say(ctx, sender, reply("Couldn't read that attachment, please re-upload it."))
             elif PARSER_AGENT_ADDRESS:
                 message_id = "photo_" + uuid4().hex[:12]
                 ctx.logger.info(f"receipt photo {message_id} from {sender} -> parser")
-                await ctx.send(sender, reply("Reading your receipt…"))
+                await say(ctx, sender, reply("Reading your receipt…"))
                 await ctx.send(PARSER_AGENT_ADDRESS, Receipt(message_id=message_id, user_id=sender,
                                                              image_url=url))
             else:  # the test parse reads email text, not photos
                 ctx.logger.info(f"receipt photo from {sender}, no PARSER_AGENT_ADDRESS")
-                await ctx.send(sender, card(
+                await say(ctx, sender, card(
                     "Got your receipt photo, but the receipt reader isn't connected yet. "
                     "Add the item here for now.", "form", add_item_form(new_item_id())))
         elif isinstance(item, EndSessionContent):
             ctx.logger.info(f"session ended by {sender}")
+        elif isinstance(item, MetadataContent):  # keys only: find out if card clicks arrive here
+            ctx.logger.info(f"metadata from {sender}: keys={sorted(item.metadata)}")
         else:
             ctx.logger.info(f"ignoring {type(item).__name__} from {sender}")
 

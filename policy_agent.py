@@ -1,32 +1,19 @@
-import asyncio
-import base64
+"""Policy agent: which refund request makes sense for a price drop, and the last day to make it.
+
+A rule table per store, no LLM and no scraping: answers instantly and costs no credits.
+See "Refund requests" in AGENTS.md for the contract and where each rule comes from.
+"""
 import json
 import os
-import re
 import sys
-import time
-from datetime import datetime, timezone
-from urllib.parse import urlparse
+from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from mcp import ClientSession
 from uagents import Agent, Context
 
-from asi import LLMError, ask_json
-from bd import DATASETS, ScrapeError, call, mcp_error, mcp_session, scrape
-from models import PolicyResult, TrackItem
+from models import PolicyCheck, PolicyResult
 
 load_dotenv()
-
-MCP_TOOLS = "search_engine,scrape_as_markdown"  # load only what we call
-DOMAINS = {"amazon": "amazon.com", "walmart": "walmart.com"}  # amzn.to links etc. read amazon.com's policy
-POLICY_LIMIT = 6000   # chars of the store's policy page sent to asi1
-PRODUCT_LIMIT = 2000  # chars of return lines from the product page
-CACHE_TTL_S = 24 * 3600  # policies rarely change and credits are shared: one scrape per store/link a day
-RETURN_WORDS = re.compile(r"return|refund|replace", re.I)
-# Spanish too: Bright Data sometimes gets a store's Spanish page (walmart.com did in testing).
-KEYWORDS = re.compile(r"return|refund|replace|exchange|price (adjust|match|protect|guarantee)|\bdays?\b"
-                      r"|devoluci|devolver|reembols|\bd[ií]as\b", re.I)
 
 SEED = os.getenv("POLICY_AGENT_SEED", "")
 if not SEED or SEED.startswith("change-me"):
@@ -35,224 +22,110 @@ if not SEED or SEED.startswith("change-me"):
 agent = Agent(
     name="refund-hunter-policy",
     seed=SEED,  # keep fixed: it sets the agent's address
-    port=8004,
+    port=8005,
     mailbox=True,
 )
 
-PROMPT = """You check store refund policies for a shopper who bought the item below.
-Use the store's policy page, and the product page lines if given (they can override the store default,
-e.g. "Non-returnable" or "Returnable until Jan 31"). Return only JSON:
-- returnable: false if this item can't be returned, true if it can, null if unclear
-- return_days: days after purchase (or delivery) to return this item, as a whole number, or null if not stated.
-  Use the window for this item's category if the policy lists one, otherwise the standard window.
-- price_adjust_days: days after purchase the store refunds the difference if the price drops,
-  0 if the policy says it doesn't do price adjustments, null if the page doesn't say
-- summary: one or two plain sentences in English for the shopper: can they return it, by when, and whether
-  the store refunds a price drop. Don't invent rules the pages don't state.
-The pages may be in another language (e.g. Spanish); read them all the same."""
-
-SCHEMA = {
-    "name": "refund_policy",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["returnable", "return_days", "price_adjust_days", "summary"],
-        "properties": {
-            "returnable": {"type": ["boolean", "null"]},
-            "return_days": {"type": ["integer", "null"]},
-            "price_adjust_days": {"type": ["integer", "null"]},
-            "summary": {"type": "string"},
-        },
+# One row per store. `steps` are tried in order: (action, days after purchase it's open).
+# `checked` is the day the source page was read. `notes` adds a caveat to the summary for that action.
+RULES = {
+    "amazon": {
+        "name": "Amazon",
+        # No refunds for price drops; a goodwill credit is a request, the return window is the sure option.
+        "steps": [("goodwill_credit", 30)],
+        "where": "Amazon customer service chat: https://www.amazon.com/gp/help/customer/contact-us",
+        "source_url": "https://www.amazon.com/gp/help/customer/display.html?nodeId=GKM69DUUYKQWKWX7",
+        "checked": "2026-10-24",
+        "notes": {},
+    },
+    "walmart": {
+        "name": "Walmart",
+        "steps": [("return_rebuy", 90)],
+        "where": "Walmart orders page, Start a return: https://www.walmart.com/orders",
+        "source_url": "https://www.walmart.com/help/article/walmart-standard-return-policy/adc0dfb692954e67a4de206fb8d9e03a",
+        "checked": "2026-10-24",
+        "notes": {"return_rebuy": "most electronics: 30 days", "none": "most electronics: 30 days"},
+    },
+    "target": {
+        "name": "Target",
+        "steps": [("price_adjustment", 14), ("return_rebuy", 90)],
+        "where": "Target guest services chat: https://help.target.com",
+        "source_url": "https://www.target.com/returns",
+        "checked": "2026-10-24",  # the 90-day return window; the 14-day price match isn't read live yet
+        "notes": {"return_rebuy": "Target-brand items: 365 days", "none": "Target-brand items: 365 days"},
+    },
+    "bestbuy": {
+        "name": "Best Buy",
+        # Best Buy matches its own lower price during the return and exchange period.
+        "steps": [("price_adjustment", 15)],
+        "where": "Best Buy chat, or call 1-888-237-8289: https://www.bestbuy.com/site/customer-service",
+        "source_url": "https://www.bestbuy.com/site/help-topics/price-match-guarantee/pcmcat290300050002.c",
+        "checked": "2026-10-25",  # the price match rule; the 15-day return period isn't read live yet
+        "notes": {"price_adjustment": "longer for My Best Buy members", "none": "longer for My Best Buy members"},
     },
 }
 
-_policies: dict[str, tuple[float, str, str]] = {}  # domain -> (time, policy url, policy text)
-_products: dict[str, tuple[float, str]] = {}       # product url -> (time, return lines)
+
+def day(d: date) -> str:
+    return f"{d:%b} {d.day}"
 
 
-class PolicyError(ScrapeError):
-    """A short, user-safe reason the policy check failed. A ScrapeError so mcp_error() keeps it."""
+def describe(action: str, rule: dict, drop: str, by: str) -> str:
+    """One line for the card, e.g. "Return & rebuy by Nov 12 to save $6.02". `drop` is "$6.02" or ""."""
+    amount = f"{drop} " if drop else ""
+    if action == "price_adjustment":
+        text = f"Ask {rule['name']} for a {amount}price adjustment {by}"
+    elif action == "goodwill_credit":
+        text = f"Ask {rule['name']} for a {amount}goodwill credit {by} (not guaranteed), or return & rebuy in that time"
+    else:
+        text = f"Return & rebuy {by}" + (f" to save {drop}" if drop else "")
+    note = rule["notes"].get(action)
+    return f"{text} ({note})" if note else text
 
 
-# ---- Bright Data ---------------------------------------------------------
-
-def domain_for(url: str, shop: str) -> str:
-    if shop in DOMAINS:
-        return DOMAINS[shop]
-    host = urlparse(url).netloc.lower().split(":")[0]
-    return re.sub(r"^(www|m|smile)\.", "", host)
-
-
-def unwrap(results: str) -> str:
-    """Bing wraps every result link in bing.com/ck/a?…&u=a1<base64 link>: put the real links first."""
-    real = []
-    for b64 in re.findall(r"[?&]u=a1([\w-]+)", results):
-        try:
-            real.append(base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)).decode())
-        except ValueError:  # not a link we can read
-            pass
-    return "\n".join(real) + "\n" + results
-
-
-def policy_link(results: str, domain: str) -> str | None:
-    """The store's own policy page among search results: on its domain, 'return' in the link if possible."""
-    links = []
-    for u in re.findall(r"https?://[^\s\"'<>)\]]+", unwrap(results)):
-        host = urlparse(u).netloc.lower().split(":")[0]
-        if host == domain or host.endswith("." + domain):
-            links.append(u.rstrip(".,"))
-    return next((u for u in links if re.search(r"return|refund", u, re.I)), links[0] if links else None)
-
-
-def plain(markdown: str) -> str:
-    """Markdown links and images to their text, bare URLs dropped: nav links like
-    "?return_to=…" would otherwise match the keywords and crowd out the policy."""
-    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", markdown)
-    text = re.sub(r"\]?\\?\(?https?://\S+", "", text)
-    text = re.sub(r"(?m)^\s*(\d+)\s*\n\s*", r"\1 ", text)  # "90" / "days" on separate lines -> "90 days"
-    return text.replace("\\", "")
-
-
-def relevant(markdown: str, limit: int) -> str:
-    """Whole page if it fits, else only the lines about returns, refunds and windows."""
-    markdown = plain(markdown)
-    if len(markdown) <= limit:
-        return markdown
-    keep = [line.strip() for line in markdown.splitlines()  # 15..1000: skip stubs and nav menus
-            if KEYWORDS.search(line) and 15 < len(line.strip()) < 1000]
-    return "\n".join(keep)[:limit]
-
-
-async def store_policy(s: ClientSession, domain: str) -> tuple[str, str]:
-    cached = _policies.get(domain)
-    if cached and time.time() - cached[0] < CACHE_TTL_S:
-        return cached[1], cached[2]
-    query = f"{domain} return policy"
-    url = policy_link(await call(s, "search_engine", {"query": query}), domain)
-    if url is None:  # Google sometimes comes back empty: one more try elsewhere (1 credit)
-        url = policy_link(await call(s, "search_engine", {"query": query, "engine": "bing"}), domain)
-    if url is None:
-        raise PolicyError(f"couldn't find {domain}'s return policy")
-    text = relevant(await call(s, "scrape_as_markdown", {"url": url}), POLICY_LIMIT)
-    if not KEYWORDS.search(text):
-        raise PolicyError(f"{domain}'s policy page had no return rules")
-    _policies[domain] = (time.time(), url, text)
-    return url, text
-
-
-def record_returns(rec, key: str = "") -> list[str]:
-    """Every "field: value" in a Scraper API record that mentions returns, however deeply nested."""
-    if isinstance(rec, dict):
-        return [line for k, v in rec.items() for line in record_returns(v, f"{key}.{k}" if key else str(k))]
-    if isinstance(rec, list):
-        return [line for v in rec for line in record_returns(v, key)]
-    text = f"{key}: {rec}"
-    return [text] if rec not in (None, "") and RETURN_WORDS.search(text) and len(text) < 400 else []
-
-
-async def product_returns(s: ClientSession, url: str, shop: str, log=print) -> str:
-    """Return lines from the product ("Non-returnable", "Returnable until …"). Optional: "" on failure.
-
-    Amazon and Walmart: the same Scraper API record the price agent reads (structured, 1 credit).
-    Other stores: the product page as markdown through the MCP (1 credit)."""
-    cached = _products.get(url)
-    if cached and time.time() - cached[0] < CACHE_TTL_S:
-        return cached[1]
+def decide(req: PolicyCheck, today: date | None = None) -> PolicyResult:
+    today = today or datetime.now(timezone.utc).date()
+    rule = RULES.get(req.store)
+    if rule is None:
+        return PolicyResult(item_id=req.item_id, ok=True, action="none",
+                            summary="Check the store's return and price-adjustment policy: we don't have its rules yet.")
+    gap = round(req.price_paid - req.current_price, 2)
+    drop = f"${gap:.2f}" if gap > 0 else ""
+    common = {"item_id": req.item_id, "ok": True, "where": rule["where"], "source_url": rule["source_url"]}
     try:
-        if shop in DATASETS:
-            page = "\n".join(record_returns(await scrape(url, DATASETS[shop])))
-        else:
-            page = await call(s, "scrape_as_markdown", {"url": url})
-    except Exception as e:  # the store policy alone still answers the question
-        log(f"product page skipped: {type(e).__name__}")
-        page = ""  # cached too: don't spend a credit on the same broken link again
-    lines = [line.strip() for line in page.splitlines() if RETURN_WORDS.search(line) and len(line) < 400]
-    text = "\n".join(lines)[:PRODUCT_LIMIT]
-    _products[url] = (time.time(), text)
-    return text
+        bought = date.fromisoformat(req.purchase_date) if req.purchase_date else None
+    except ValueError:
+        bought = None
+    if bought is None:  # no deadline without a purchase date: say how long the window is instead
+        action, days = rule["steps"][0]
+        return PolicyResult(**common, action=action,
+                            summary=describe(action, rule, drop, f"within {days} days of purchase"))
+    for action, days in rule["steps"]:
+        deadline = bought + timedelta(days=days)
+        if deadline >= today:
+            return PolicyResult(**common, action=action, deadline=deadline.isoformat(),
+                                summary=describe(action, rule, drop, f"by {day(deadline)}"))
+    note = f" ({rule['notes']['none']})" if "none" in rule["notes"] else ""
+    return PolicyResult(**common, action="none", deadline=deadline.isoformat(),
+                        summary=f"{rule['name']}'s return window closed {day(deadline)}{note}")
 
 
-# ---- asi1 --------------------------------------------------------------------
-
-async def read_policy(domain: str, policy: str, product: str) -> dict:
-    text = f"{PROMPT}\n\nStore: {domain}\n\nStore policy page:\n{policy}"
-    if product:
-        text += f"\n\nProduct page lines about returns:\n{product}"
+@agent.on_message(model=PolicyCheck, replies=PolicyResult)
+async def on_check(ctx: Context, sender: str, req: PolicyCheck):
     try:
-        return await ask_json(text, SCHEMA)
-    except LLMError as e:
-        raise PolicyError(str(e)) from e
-
-
-def to_days(value) -> int | None:
-    """A whole number of days in 0..365, else None (we don't trust it)."""
-    if isinstance(value, bool):
-        return None
-    try:
-        days = int(value)
-    except (TypeError, ValueError):
-        return None
-    return days if 0 <= days <= 365 else None
-
-
-async def get_policy(req: TrackItem, log=print) -> PolicyResult:
-    now = datetime.now(timezone.utc).isoformat()
-    domain = domain_for(req.product_url, req.store)
-    if not domain:
-        return PolicyResult(item_id=req.item_id, ok=False, checked_at=now, error="no store in that link")
-    try:
-        try:
-            async with mcp_session(MCP_TOOLS) as s:
-                url, policy = await store_policy(s, domain)
-                product = await product_returns(s, req.product_url, req.store, log)
-        except Exception as e:  # from None: the cause can carry the token URL
-            raise PolicyError(str(mcp_error(e))) from None
-        data = await read_policy(domain, policy, product)
-    except PolicyError as e:
-        return PolicyResult(item_id=req.item_id, ok=False, checked_at=now, error=str(e))
-    returnable = data.get("returnable")
-    return PolicyResult(item_id=req.item_id, ok=True, checked_at=now, policy_url=url,
-                        returnable=returnable if isinstance(returnable, bool) else None,
-                        return_days=to_days(data.get("return_days")),
-                        price_adjust_days=to_days(data.get("price_adjust_days")),
-                        summary=str(data.get("summary") or "").strip()[:400])
-
-
-@agent.on_message(model=TrackItem, replies=PolicyResult)
-async def on_track(ctx: Context, sender: str, req: TrackItem):
-    start = time.monotonic()
-    try:
-        result = await get_policy(req, ctx.logger.info)
+        result = decide(req)
     except Exception as e:  # never leave the coordinator waiting
-        # Type only: MCP errors can carry the URL, which holds the token.
         ctx.logger.error(f"policy check crashed for {req.item_id}: {type(e).__name__}")
-        result = PolicyResult(item_id=req.item_id, ok=False, error=f"unexpected error: {type(e).__name__}",
-                              checked_at=datetime.now(timezone.utc).isoformat())
-    outcome = (f"returnable={result.returnable} days={result.return_days} adjust={result.price_adjust_days}"
-               if result.ok else f"failed ({result.error})")
-    ctx.logger.info(f"{req.item_id} [{req.store}] {outcome} in {time.monotonic() - start:.1f}s")
+        result = PolicyResult(item_id=req.item_id, ok=False, error=f"unexpected error: {type(e).__name__}")
+    ctx.logger.info(f"{req.item_id} [{req.store}] {result.action} deadline={result.deadline or '-'}")
     await ctx.send(sender, result)
 
 
-async def list_tools():
-    """Step 0 in AGENTS.md: print the MCP tools we load and their inputs. Costs no credits."""
-    async with mcp_session(MCP_TOOLS) as s:
-        for t in (await s.list_tools()).tools:
-            print(t.name, json.dumps(t.input_schema))
-
-
-async def check_once(url: str, shop: str):
-    """Manual test: one policy check. Costs 2-3 Bright Data credits and one ASI:One call."""
-    req = TrackItem(item_id="it_check000", user_id="check", product_url=url, store=shop)
-    print(json.dumps(json.loads((await get_policy(req)).model_dump_json()), indent=2))
-
-
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--tools":
-        asyncio.run(list_tools())
-    elif len(sys.argv) > 2 and sys.argv[1] == "--check":
-        # uv run policy_agent.py --check <url> [amazon|walmart|other]
-        asyncio.run(check_once(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "amazon"))
+    if len(sys.argv) > 4 and sys.argv[1] == "--check":
+        # uv run policy_agent.py --check <store> <price_paid> <current_price> [YYYY-MM-DD]
+        req = PolicyCheck(item_id="it_check000", store=sys.argv[2], price_paid=float(sys.argv[3]),
+                          current_price=float(sys.argv[4]), purchase_date=sys.argv[5] if len(sys.argv) > 5 else "")
+        print(json.dumps(json.loads(decide(req).model_dump_json()), indent=2))
     else:
         agent.run()

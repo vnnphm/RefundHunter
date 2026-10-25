@@ -7,8 +7,8 @@ The rules for anyone (human or coding agent) working in this repo. Verified agai
 Fetch.ai uAgents that find money users are owed on past purchases. Users only talk to it inside an ASI:One chat. Fetch.ai track, Cal Hacks 13.0 (Oct 23–25, 2026).
 
 **Phase 1 (must ship):** user adds an item in ASI:One → we fetch its live price with Bright Data → chat shows "Dropped $X" or "No change".
-**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (user forwards to a Pipedream inbox → FastAPI `server.py`). See Email receipts.
-**Phase 3 (if time):** refund policy check, claim draft, Payment Protocol.
+**Phase 2 (should ship):** receipts become tracked items without typing: a **receipt photo uploaded in the ASI:One chat** (build first: it stays inside ASI:One) and **order emails** (the user taps **Connect Gmail** and FastAPI `server.py` reads their recent orders once). See Email receipts.
+**Phase 3 (if time):** refund policy check, claim draft (see Refund requests), Payment Protocol.
 
 Build in phase order. Don't start a phase until the one before works in ASI:One.
 
@@ -18,28 +18,32 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 
 | Agent | File | Phase | Job | Receives | Sends |
 | --- | --- | --- | --- | --- | --- |
-| Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price and policy agents about them. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt`, `PolicyResult` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
-| Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data | `TrackItem` | `PriceResult` |
+| Coordinator | `agent.py` | 1 | Talks to the user in ASI:One, shows cards, saves items, asks the price agent for prices. The only agent that writes items | `ChatMessage` (user, incl. photos), `PriceResult`, `ParsedReceipt` | `ChatMessage` + cards, `TrackItem`, `Receipt` |
+| Price agent | `price_agent.py` | 1 | Gets the live price of one item from Bright Data; searches Amazon or Walmart for receipt items without a link | `TrackItem`, `FindProduct` | `PriceResult`, `FindResult` |
 | Parser agent | `parser_agent.py` | 2 | Reads a receipt (photo or email text) into store, date and line items | `Receipt` (from the coordinator or the webhook) | `ParsedReceipt` (to the coordinator) |
-| Policy agent | `policy_agent.py` | 3 | Is the item still refundable, and until when; does the store refund a price drop (Bright Data MCP + `asi1`) | `TrackItem` | `PolicyResult` |
-| Claim writer | `claim_agent.py` | 3 | Drafts the refund request | item + policy | claim text |
+| Policy agent | `policy_agent.py` | 3 | Which request makes sense for this store, and the deadline (rules, no LLM) | `PolicyCheck` | `PolicyResult` |
+| Claim writer | `claim_agent.py` | 3 | Drafts the refund request the user pastes into the store's chat | `ClaimRequest` | `ClaimDraft` |
 
-Not agents: `store.py` (SQLite, shared state), `bd.py` (Bright Data helpers: Scraper API + MCP), `asi.py` (`asi1` JSON calls), `server.py` (FastAPI webhook), Pipedream, Bright Data.
+Not agents: `store.py` (SQLite, shared state), `asi.py` (`asi1` JSON calls, used by the parser), `run_all.py` (starts every agent with one command), `server.py` (FastAPI: Gmail connect, plus an optional forwarding webhook), `gmail.py` (Google OAuth + Gmail API), Bright Data.
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
-**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow.
+**Flow (Phase 2):** receipt photo in chat (or email via webhook) → coordinator → `Receipt` → parser agent → `ParsedReceipt` → coordinator → review card → user confirms → saved items → Phase 1 flow. An Amazon or Walmart item without a link → `FindProduct` → price agent searches → `FindResult` → carousel → user picks one → Phase 1 flow.
 
-**Flow (Phase 2, email):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
+**Flow (Phase 2, optional forwarding, not used in the demo):** forwarded email → Pipedream → `server.py` → `Receipt(sender=<from email>)` → coordinator looks up the linked ASI:One user → `Receipt(user_id=…)` → parser agent → same as above.
 
-## Who owns what (2 people)
+**Flow (Phase 2, Gmail connect):** menu → **Connect Gmail** → signed link → Google sign-in → `server.py` reads up to 10 recent order emails once, revokes the token → `Receipt(user_id=<from the link>)` each → coordinator → parser agent → same as above.
+
+## Who owns what
 
 | | Person A: ASI:One side | Person B: data side |
 | --- | --- | --- |
-| Owns | `agent.py`, `store.py`, cards, `price_agent.py`, `server.py`, Pipedream, README, demo video | `parser_agent.py` (photos and email text) |
+| Owns | `agent.py`, `store.py`, cards, `price_agent.py`, `server.py`, `gmail.py`, README, demo video | `parser_agent.py` (photos and email text) |
 | Phase 1 | Coordinator replies in ASI:One → form card → save item → detail card + carousel | Bright Data prints a real price (Price scraping, Path A) → price agent answers `TrackItem` with `PriceResult` |
-| Phase 2 | Email path (link email, `server.py`, Pipedream) + `ParsedReceipt` handling and review card in `agent.py` | Parser agent: `asi1` reads photos and email text, replies `ParsedReceipt` to its sender |
+| Phase 2 | Email path (Connect Gmail: `server.py`, `gmail.py`) + `ParsedReceipt` handling and review card in `agent.py` | Parser agent: `asi1` reads photos and email text, replies `ParsedReceipt` to its sender |
 | Until the other side is ready | Fake `PriceResult` with a hardcoded price | Test with a script that sends `TrackItem` |
+
+**Phase 3:** the policy agent (`policy_agent.py`) is MM77a's, the claim agent (`claim_agent.py`) is Jiayi's, and Vinny wires both into the coordinator. Until an agent is ready, the coordinator shows a labelled test result, and each agent can be tested alone with a script that sends its request model. See Refund requests.
 
 `models.py` is shared: write it together first and change it only together. Work on separate branches and merge often.
 
@@ -89,19 +93,69 @@ class ParsedReceipt(Model):   # parser agent -> coordinator
     items: list[ReceiptItem] = []
     error: Optional[str] = None
 
-class PolicyResult(Model):    # policy agent -> coordinator (Phase 3)
+class FindProduct(Model):     # coordinator -> price agent: a receipt item with no link
     item_id: str
+    user_id: str
+    query: str                # item name from the receipt
+    store: str = "amazon"
+
+class ProductMatch(Model):
+    name: str
+    product_url: str
+    price: Optional[float] = None
+    image_url: str = ""
+
+class FindResult(Model):      # price agent -> coordinator
+    item_id: str
+    user_id: str
     ok: bool
-    returnable: Optional[bool] = None         # False = store says this item can't be returned
-    return_days: Optional[int] = None         # return window; refundable until purchase date + this
-    price_adjust_days: Optional[int] = None   # days the store refunds a price drop; 0 = never
-    summary: str = ""                         # one or two sentences for the chat card
-    policy_url: str = ""                      # the store policy page that was read
-    checked_at: str = ""                      # ISO 8601 UTC
+    matches: list[ProductMatch] = []
     error: Optional[str] = None
 ```
 
 A price counts as dropped when `price_paid - current_price > 1` and `ok` is true.
+
+**Phase 3 (agreed, in `models.py`):**
+```python
+class PolicyCheck(Model):     # coordinator -> policy agent, when a drop is found
+    item_id: str
+    store: str                # "amazon" | "walmart" | "other" today; "target" | "bestbuy" later
+    purchase_date: str = ""   # YYYY-MM-DD; "" if unknown (item added by hand)
+    price_paid: float
+    current_price: float
+
+class PolicyResult(Model):    # policy agent -> coordinator
+    item_id: str
+    ok: bool
+    action: str = "none"      # "price_adjustment" | "goodwill_credit" | "return_rebuy" | "none"
+    deadline: str = ""        # YYYY-MM-DD, last day to act; "" if the purchase date is unknown
+    where: str = ""           # how to reach the store, with its help/chat link
+    summary: str = ""         # one line for the card, e.g. "Return & rebuy by Nov 12 to save $6.02"
+    source_url: str = ""      # the policy page the rule comes from
+    error: Optional[str] = None
+
+class ClaimRequest(Model):    # coordinator -> claim agent, when the user taps "Draft a refund request"
+    item_id: str
+    user_id: str
+    store: str
+    item_name: str
+    product_url: str = ""
+    price_paid: float
+    current_price: float
+    purchase_date: str = ""   # YYYY-MM-DD, from the receipt
+    order_number: str = ""
+    action: str = ""          # from PolicyResult; "" = the claim agent picks its default for the store
+    deadline: str = ""        # from PolicyResult; never guessed
+
+class ClaimDraft(Model):      # claim agent -> coordinator
+    item_id: str
+    user_id: str
+    ok: bool
+    action: str = ""
+    message: str = ""         # ready to paste, plain text
+    where: str = ""           # how to send it (PolicyResult.where, or the claim agent's default)
+    error: Optional[str] = None
+```
 
 ## Setup
 
@@ -119,9 +173,9 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 | openai (ASI:One LLM) | 3.37.0 | latest on 2026-10-23 |
 | fastapi + uvicorn (Phase 2) | 0.162.0 / 0.54.0 | latest on 2026-10-23 |
 
-**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `POLICY_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `POLICY_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `WEBHOOK_SECRET`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
+**`.env` keys:** `AGENT_SEED` (coordinator), `PRICE_AGENT_SEED`, `PARSER_AGENT_SEED`, `PRICE_AGENT_ADDRESS`, `BRIGHTDATA_API_TOKEN`, `ASI_ONE_API_KEY`, `PARSER_AGENT_ADDRESS`, and for email: `SERVER_SEED`, `SERVER_ADDRESS`, `COORDINATOR_ADDRESS`, and for Gmail connect: `PUBLIC_URL`, `OAUTH_STATE_SECRET` (both: coordinator and server), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (server), and for Phase 3: `POLICY_AGENT_SEED`, `POLICY_AGENT_ADDRESS`, `CLAIM_AGENT_SEED`, `CLAIM_AGENT_ADDRESS` (the claim agent also uses `ASI_ONE_API_KEY`). Optional forwarding only: `WEBHOOK_SECRET`, `RECEIPT_INBOX`. No OpenAI key: `asi1` reads receipt photos itself (see Receipt photos). `BRIGHTDATA_API_TOKEN` is one key for both the Scraper API and the MCP.
 - **Every person uses their own seeds.** Same seed = same address, and two running copies fight over one mailbox.
-- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, policy agent 8004, email webhook (`server.py`) 8000.
+- **Ports:** coordinator 8001, price agent 8002, parser agent 8003, claim agent 8004, policy agent 8005, email webhook (`server.py`) 8000.
 
 ## Run and connect
 
@@ -149,6 +203,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 - One `MetadataContent` with string values only: `card_protocol_version: "1"`, `requires_card_interaction: "true"`, `card_kind`, and `card_payload` as `json.dumps(...)` with no wrapper. Invalid cards silently show as plain text.
 - Test payloads in the Card Playground first.
 - Replies arrive as JSON (direct @mention) or prose (planner): try `json.loads`, then parse text. Put `item_id` in every `selection`.
+- ASI:One answers `429 rate limited` to messages sent back-to-back and drops them (no retry). Send every user message through `say()` in `agent.py`, which spaces one user's messages 1.5 s apart.
 
 **Bright Data**: see "Price scraping" below.
 
@@ -165,7 +220,7 @@ A price counts as dropped when `price_paid - current_price > 1` and `ok` is true
 
 ## Price scraping (Bright Data)
 
-Owner: Person B, in `price_agent.py`; the shared Scraper API and MCP helpers live in `bd.py`. Based on Bright Data's own agent guidance in [llms.txt](https://docs.brightdata.com/llms.txt): use a ready-made Scraper API when the site has one; use the MCP for page fetching; never fetch through a raw proxy and parse HTML yourself.
+Owner: Person B, in `price_agent.py` (move helpers to `bd.py` if it grows). Based on Bright Data's own agent guidance in [llms.txt](https://docs.brightdata.com/llms.txt): use a ready-made Scraper API when the site has one; use the MCP for page fetching; never fetch through a raw proxy and parse HTML yourself.
 
 **Which path for which store**
 
@@ -178,6 +233,8 @@ Owner: Person B, in `price_agent.py`; the shared Scraper API and MCP helpers liv
 
 **Built:** Path A for Amazon and Walmart in `price_agent.py`. `store: "other"` replies `ok=False, error="store not supported yet"` until C is added. Dataset ids come from [scrapers.json](https://docs.brightdata.com/scrapers.json).
 Test one link without starting the agent (costs one credit): `uv run price_agent.py --check <url> [amazon|walmart]`.
+
+**Search (receipt items without a link):** Amazon products search `gd_lwdb4vjm1ehb499uxs`, input `{"keyword", "url": "https://www.amazon.com", "pages_to_search": 1}` with `limit_per_input=3` (honoured: 3 records = 3 credits, ~7 s). Fields: `asin`, `name`, `final_price`, `image`, `sponsored`, `rank_on_page`. Sponsored and priceless results are skipped; URLs become `https://www.amazon.com/dp/<asin>`, and their prices go into the 10-minute cache, so tracking a pick costs nothing. Walmart: products search `gd_m7khey0wb7wviejgj`, input `{"url": "https://www.walmart.com/search?q=<name>"}`, same limit (50–80 s; names sometimes come back in Spanish, so `english_name` rebuilds them from the English `canonical_url` slug). Fields: `us_item_id`, `name`, `price`, `is_sponsored_flag`, `product_index`; links become `https://www.walmart.com/ip/<us_item_id>`, which the Walmart product scraper accepts (`final_price` confirmed). Walmart's emails have no product links at all (the item picture is a bare `<img>` with the name as alt text), so search is how Walmart items get one. Other stores get the link form. Test: `uv run price_agent.py --search "<item name>" [amazon|walmart]` (≤3 credits).
 
 **Auth and budget**
 - One API key. REST: `Authorization: Bearer <BRIGHTDATA_API_TOKEN>`. MCP: `https://mcp.brightdata.com/mcp?token=<BRIGHTDATA_API_TOKEN>`.
@@ -233,7 +290,7 @@ async def amazon_price(url: str) -> dict:
   ```python
   res = await s.list_tools()
   for t in res.tools:
-      print(t.name, t.input_schema)  # mcp 2.x: input_schema, not inputSchema
+      print(t.name, t.inputSchema)
   ```
 - **B:** `search_scrapers` with the store's domain → `dataset_id` → `get_scraper_details` (input fields, price field) → call Path A's REST endpoint with that `dataset_id`. Look the id up once and save it as a constant.
 - **C:** `scrape_as_markdown` → first ~8,000 chars → ASI:One (`asi1`, temperature 0) returns strict JSON `{"title", "price", "currency", "in_stock"}`.
@@ -269,44 +326,19 @@ async def read_price(markdown: str) -> dict:
 Confirm `{"url": ...}` against Step 0's `inputSchema`.
 
 **Rules**
-- Only the price and policy agents call Bright Data. The coordinator says "Checking price…" and sends the card when `PriceResult` arrives.
+- uagents runs an agent's handlers **one at a time**: a handler that awaits a 60 s scrape holds up every message behind it. `price_agent.py` starts each job with `background()` (at most `MAX_JOBS` at once) and returns. Searches give up after `SEARCH_LIMIT_S` (75 s) and the user gets the link form; price checks keep the longer limit.
+- Only the price agent calls Bright Data. The coordinator says "Checking price…" and sends the card when `PriceResult` arrives.
 - Every failure (timeout, 4xx/5xx, empty record, no price) becomes `PriceResult(ok=False, error=...)`. Never let the handler raise.
 - Accept only a positive number as a price.
 - Don't re-scrape a URL within a few minutes; reuse the stored price and `checked_at`. Credits are shared.
 - Skip the MCP `extract` tool: it relies on MCP sampling, which our client doesn't implement. Path C does the same job.
 - Never log the API key or a URL containing `?token=`.
 
-## Refund policies (Phase 3)
-
-Owner: Person B, in `policy_agent.py`. Answers a `TrackItem` with a `PolicyResult`: can this item be returned, how many days the window is, and whether the store refunds a price drop (the case Refund Hunter cares about most). Uses Bright Data's MCP (Path B/C above), not a hand-written scraper.
-
-**Status:** built and called by the coordinator when `POLICY_AGENT_ADDRESS` is set. Test one link (2–3 credits + one `asi1` call): `uv run policy_agent.py --check <url> [amazon|walmart|other]`. `uv run policy_agent.py --tools` prints the MCP tools and their inputs (Step 0, free).
-
-**How it works**
-1. Store domain: `amazon.com` / `walmart.com` for those stores (so `amzn.to` links work), else the product link's host without `www.`.
-2. Store policy page: MCP `search_engine` with `"<domain> return policy"` (Google; once more on Bing if Google returns no store link) → first result on the store's own domain, preferring links with "return" or "refund" → `scrape_as_markdown`. Links and URLs are stripped first (nav links like `?return_to=` match the keywords); pages still over 6,000 chars keep only lines about returns, refunds and days (English or Spanish). Cached per domain for 24 h.
-3. Product page, since a product can override the store default ("Non-returnable", "Returnable until Jan 31"): Amazon and Walmart use the same Scraper API record as the price agent (`bd.scrape`) and keep every field that mentions return / refund / replace; other stores use `scrape_as_markdown` and keep those lines (≤ 2,000 chars). Optional: a failed scrape is cached as empty and the store policy alone answers. Cached per link for 24 h. Amazon records have `return_policy` (e.g. "FREE 30-day refund/replacement") and `frequently_returned_item_message`; Walmart's fields aren't checked yet (`uv run price_agent.py --check <url> walmart` prints all keys).
-4. `asi1` (temperature 0, JSON schema) reads both and returns `returnable`, `return_days`, `price_adjust_days`, `summary`. Days outside 0–365 become `None`.
-
-**Coordinator side:** `track_new_item` sends the same `TrackItem` to `POLICY_AGENT_ADDRESS` next to the price check. `TrackItem` has no purchase date, so the policy agent returns the window and the coordinator does the date math: return by = `items.purchase_date` (from the receipt) else `added_at` + `return_days`. `PolicyResult` is saved on the item (`store.save_policy`); the detail card gets "Return by" (or "Not returnable"), "Price adjustment" and "Policy" rows. If the price card was already shown, it's re-sent with those rows; if not, the price card includes them. A failed policy check is logged and the card just leaves the rows out.
-
-**Tested live (2026-10-24)** with the real Bright Data key, then end to end with `asi1`:
-- Policy pages found: Amazon `…display.html?nodeId=GKM69DUUYKQWKWX7` (30 days), Walmart `…/walmart-standard-return-policy/…` (90 days, most electronics 30), Target `target.com/returns` (90 days, Target brand 365).
-- Walmart's page came back **in Spanish**; the prompt tells `asi1` to read any language and answer in English.
-- Google once returned no links for Walmart; hence the Bing retry.
-- Bing wraps result links in `bing.com/ck/a?…&u=a1<base64>` redirects; `policy_link` decodes them, or the Bing retry finds nothing.
-- `asi1` results: Amazon `B09XS7JWHH` → returnable, 30 days. Walmart onn 32" Roku TV → returnable, 30 days (electronics). Target (a Threshold towels page) → returnable, 90 days, summary mentions Target brand 365. `price_adjust_days` came back `null` for all three: none of the policy pages mention price adjustments.
-- walmart.com's policy-page scrape failed in 2 of 3 runs (`scrape_as_markdown` error, same page scraped fine in between): not retried, to save credits; that check returns `ok=False` and the card leaves the policy rows out.
-
-**Rules**
-- MCP session URL holds the token: errors are reported by type only, never the exception text or traceback. `bd.py` sets the `httpx`, `httpx2` and `mcp` loggers to WARNING, because `httpx2` logs every request URL (token included) at INFO.
-- One MCP session per check; the whole check costs ≤ 3 credits, and 0 when both pages are cached.
-
 ## Receipt photos (Phase 2)
 
 Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5) and the ASI:One API docs on image input.
 
-**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Step 3 is built in `parser_agent.py` (photos and email text; test with `uv run parser_agent.py --check <photo | link | email.txt>`). Steps 4–5 are next.
+**Status:** steps 1–2 are built in `agent.py` (`accepts_attachments()`, `image_url()`). Step 3 is built in `parser_agent.py` (photos and email text; test with `uv run parser_agent.py --check <photo | link | email.txt>`). Steps 4–5 are built in `agent.py` (review card, link form, Amazon search carousel).
 
 **1. Tell ASI:One we accept attachments.** When a `StartSessionContent` arrives, reply with:
 ```python
@@ -348,7 +380,7 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 **4. Confirm before tracking** (coordinator). Show a `review` card: store, date, and each item with its price. Approve → save items and send `TrackItem`s. Never track items the user hasn't confirmed; OCR misreads prices.
 
-**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`, show a `form` card asking for the link. Later, if there's time: search for it (Bright Data MCP `search_engine`, or Amazon's Products Search scraper `gd_lwdb4vjm1ehb499uxs`) and let the user pick from a `carousel`.
+**5. Missing product links.** Paper receipts have names, not links, and the price agent needs a link. For each item without `product_url`: on an Amazon or Walmart receipt, the coordinator sends `FindProduct` and shows the top 3 matches from that store in a `carousel` (each tile's button is a filled-in `submit_item`), then a link form for "not listed". The user picks, because one name matches several variants (sizes, kits). Other stores, or no matches, get the link form. The search starts when the review card is shown, not on Approve (Walmart's takes 50–80 s), and the matches wait in `ctx.storage` until the user approves; dismissing forgets them. Only shown cards search, so a Gmail import spends credits on one receipt at a time.
 
 **Rules**
 - Only use the photo to read the receipt; don't store the image or its bytes. Keep only the parsed fields.
@@ -356,25 +388,114 @@ Then: reply "Reading your receipt…" right away, and send `Receipt(message_id="
 
 ## Email receipts (Phase 2)
 
-Owner: Person A. Users forward order emails to one shared inbox; the coordinator matches the sender to a linked ASI:One user. No Gmail OAuth.
+Owner: Person A. Users tap **Connect Gmail**, sign in with Google, and their recent order emails become review cards. No forwarding, no filters. The Pipedream forwarding path further down is built and tested but **not used**: it's optional, and nothing needs to run for it.
 
-**Linking.** Menu → **Link my email** (or "link my email you@x.com") → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
+**Gmail connect (OAuth).** Import on connect, keep nothing. Menu → **Connect Gmail** → the coordinator replies with `{PUBLIC_URL}/oauth/start?state=…` (cards can't open links, so it's in the text). The `state` is the user's ASI:One address + time, HMAC-signed with `OAUTH_STATE_SECRET`, valid 15 minutes (`gmail.sign_state`/`check_state`). `/oauth/start` → Google consent (`gmail.readonly`, `access_type=online`: no refresh token) → `/oauth/callback` swaps the code for a token, reads the Gmail address and up to 10 messages matching `gmail.QUERY` (last 30 days, purchases/order/receipt, no shipping updates, no Amazon since its emails don't list items), revokes the token, and sends each as `Receipt(message_id="gm_"+id, user_id=<from state>, sender=<gmail>)`. The coordinator trusts `user_id` only from `SERVER_ADDRESS` and links that Gmail address, so later forwards work too.
+- Google Cloud Console: enable the **Gmail API**; Google Auth Platform → Branding (app name, support email), Audience **External, left in Testing** with test users added (max 100; they see "Google hasn't verified this app" → Advanced → Continue), Data access: `…/auth/gmail.readonly`; Clients → **Web application** with redirect URIs `https://<server URL>/oauth/callback` and `http://localhost:8000/oauth/callback`.
+- Only test users can sign in, so add judges' Gmail addresses before they try it.
+- Never log the token, the code, bodies or full addresses (count and domain only).
 
-**Pipedream** (no code in repo)
-1. New workflow, trigger **Email** ("new email received"). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
-2. Step: HTTP POST to `<server URL>/email`, header `X-Webhook-Secret: <WEBHOOK_SECRET>`, JSON `{"message_id", "from", "subject", "date", "text", "html"}` from the trigger event.
-3. A forwarded email's `from` is the person who forwarded it, which is what linking matches.
+**`server.py`** (`uv run uvicorn server:app --port 8000`, or deploy to Vercel: zero-config FastAPI). It turns each email into text (the HTML part when there is one, since stores put items there; image alt text kept, as stores cut long names short; only product links kept, unwrapped from tracking redirects; 8,000 chars max) and sends it as a `Receipt` to `COORDINATOR_ADDRESS` with `send_message_to_agent` (`uagents_core.utils.messages`), signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. On Vercel, set `SERVER_SEED`, `COORDINATOR_ADDRESS`, `PUBLIC_URL`, `OAUTH_STATE_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and turn off Vercel Authentication (Deployment Protection) so Google's redirect can reach it.
 
-**`server.py`** (`uv run uvicorn server:app --port 8000`): checks the secret, takes the address out of `from`, turns HTML-only mail into text (keeping link targets), trims to 8,000 chars, and sends `Receipt(user_id="", sender=<email>)` to `COORDINATOR_ADDRESS` with `send_message_to_agent` from `uagents_core.utils.messages`, signed with its own `SERVER_SEED` identity. Put the address `/health` reports in `.env` as `SERVER_ADDRESS`; the coordinator only accepts `Receipt`s from it. Deploy to Railway for a stable URL; `cloudflared tunnel --url http://localhost:8000` works for testing.
+**Coordinator.** A `Receipt` from `SERVER_ADDRESS` with `user_id` set (Gmail connect) is used as is, and its address gets linked; one without (forwarding) is matched by linked address, and an unlinked sender is dropped (logged by domain only). Then → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. A `ParsedReceipt` with no priced items is dropped quietly for emails (a broad search lets some non-receipts through), but photos get "couldn't read the items". Otherwise → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
 
-**Coordinator.** Unlinked sender → dropped (logged by domain only). Linked → forwarded to `PARSER_AGENT_ADDRESS` with `user_id` filled in; if that's empty, a test parse (subject + first `$` amount + first shop link) stands in, labelled on the card. `ParsedReceipt` → saved as pending in `receipts` (the `message_id` key drops duplicates) → `review` card. Approve → each item with a shop link goes into the Phase 1 flow; items without one get a form asking only for the link. "Any new receipts?" re-sends pending review cards, and the menu mentions them, in case ASI:One doesn't show messages the agent sends first.
-
-**Open questions**
-- Does Agentverse deliver `server.py`'s messages? Its identity isn't registered as an agent. If not: register it (`register_with_agentverse`), or move the webhook onto a uAgent with `on_rest_post`.
-- Does ASI:One show the review card when the agent messages first? If not, the demo says "any new receipts?".
+**Answered in testing (2026-10-24)**
+- Agentverse delivers `server.py`'s messages even though its identity isn't registered as an agent.
+- ASI:One shows cards the agent sends first, but answers `429 rate limited` to a burst (see `say()`), so a Gmail import shows one card and keeps the rest pending.
 
 **Rules**
 - Keep only parsed fields. Never log email bodies or full addresses (message id and domain only).
+
+### Optional: forwarding through Pipedream (not used)
+
+Kept for later; skip it for setup and the demo. With `WEBHOOK_SECRET` unset (as in our Vercel), `/email` refuses every request (401), so leaving it in is safe. Why we dropped it: each user had to confirm a forwarding address and make a Gmail filter, and Amazon's emails no longer list items anyway.
+
+**Linking** (for forwarding). Type "link my email you@x.com" (Gmail connect links automatically) → `store.link_email(email, user)`. One row per email (lowercase); re-linking moves it. No ownership check for the demo: anyone can claim any address. Production fix: a one-time code the user forwards to prove the address.
+
+**Pipedream** (only the code step below lives outside the repo)
+1. New workflow, trigger **Email** ("New Email Received"; instant, not polled). Its unique `…@upload.pipedream.net` address goes in `.env` as `RECEIPT_INBOX`.
+2. Workflow **Settings → Environment Variables**: `WEBHOOK_SECRET` (same as `.env` and Vercel) and `REFUND_SERVER_URL` (Vercel URL, no trailing slash).
+3. Step **Node → Run Node code**. The event is `{headers, body: {text, html, …}}`; header values can be lists:
+   ```js
+   export default defineComponent({
+     async run({ steps }) {
+       const e = steps.trigger.event;
+       const addr = v => typeof v === "string" ? v : Array.isArray(v) ? v.map(addr).join(", ")
+         : (v?.value || []).map(a => a.address).filter(Boolean).join(", ") || v?.text || v?.address || "";
+       const one = v => (Array.isArray(v) ? v[0] : v) ?? "";
+       const hdr = n => Object.entries(e.headers || {}).find(([k]) => k.toLowerCase() === n)?.[1];
+       const res = await fetch(`${process.env.REFUND_SERVER_URL}/email`, {
+         method: "POST",
+         headers: { "Content-Type": "application/json", "X-Webhook-Secret": process.env.WEBHOOK_SECRET },
+         body: JSON.stringify({
+           message_id: e.messageId || hdr("message-id") || `pd_${Date.now()}`,
+           from: [e.from, hdr("from"), e.mail_from, e.envelope?.from].map(addr).find(Boolean) || "",
+           forwarded_for: addr(hdr("x-forwarded-for")),
+           to: [e.to, hdr("to")].map(addr).find(Boolean) || "",
+           subject: String(e.subject || one(hdr("subject"))), date: String(e.date || one(hdr("date"))),
+           text: e.body?.text || e.text || "", html: e.body?.html || e.html || "",  // body sits under event.body
+         }),
+       });
+       const body = await res.text();
+       if (!res.ok) throw new Error(`server ${res.status}: ${body}`);
+       return body;
+     },
+   });
+       const body = await res.text();
+       if (!res.ok) throw new Error(`server ${res.status}: ${body}`);
+       return body;
+     },
+   });
+   ```
+4. Each user, once in Gmail: Settings → **Forwarding and POP/IMAP** → add the inbox address (Gmail mails a confirm link to it: open it from the trigger's event list). Then a filter by keywords, so any store works. Has the words: `subject:(order OR receipt OR purchase) ("order total" OR "order number" OR "order #" OR subtotal)`; Doesn't have: `shipped OR delivered OR "out for delivery" OR refund OR return` (shipping updates would repeat the order) → **Forward to** the inbox.
+5. Who it's from: a hand-forwarded email's `from` is the user. A filter auto-forward keeps the store as `from`, but the original `To` is still the user (and Gmail may add `X-Forwarded-For: user@gmail.com inbox@…`). `server.py` uses `X-Forwarded-For`, else the first `To` when the `@upload.pipedream.net` inbox isn't among them (auto-forward), else `from` (hand forward).
+
+Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `422` no sender found, `502` coordinator unreachable, `{"ok":true}` but no card → address not linked or a repeated `message_id`.
+
+**`server.py` `/email`** (forwarding only): checks the `X-Webhook-Secret` header, takes the user's address from `forwarded_for`, else `to` on an auto-forward, else `from`, and sends `Receipt(user_id="", sender=<email>)` the same way as above. `cloudflared tunnel --url http://localhost:8000` works for testing it locally.
+
+
+## Refund requests (Phase 3)
+
+Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built:** the policy agent and the Phase 3 models. **Not yet:** the claim agent and the coordinator wiring.
+
+**Why.** Finding a drop isn't the money. Stores don't refund drops on their own, and returns can't be automated: they sit behind the user's login and change often. But store chats (Target, Best Buy, Amazon customer service) take a pasted message. So the last step is: **"Dropped $6.02" → tap "Draft a refund request" → where to send it, and a ready-to-paste message.** The user sends it; we never contact a store.
+
+**Flow.** `PriceResult` shows a drop → coordinator sends `PolicyCheck` → `PolicyResult` saved in the coordinator's `ctx.storage` under `policy:<item_id>`, its `summary` added to the price card → user taps **Draft a refund request** → `ClaimRequest` (item facts + the policy's `action`/`deadline`) → `ClaimDraft` → coordinator sends "Paste this into {where} by {deadline}:" and then the message alone (so it copies cleanly). Each agent works without the other: no policy → the claim agent picks its default action and states no deadline; no claim agent → the card still shows the policy summary.
+
+**Policy agent (`policy_agent.py`, MM77a; port 8005, `POLICY_AGENT_SEED`, mailbox)**
+- A rule table, no LLM: store → `action`, window in days, `where` (help/chat link), `source_url`. `deadline` = purchase date + window; empty when the purchase date is unknown; `action="none"` with a `summary` like "Return window closed Oct 30" when it's passed.
+- What we know so far (**verify each against the store's current policy page, and put that URL and the date checked in the table**): Amazon and Walmart don't refund price drops after purchase, so the options are return & rebuy within the return window, or (Amazon) asking customer service for a goodwill credit, which isn't guaranteed. Target and Best Buy offer price adjustments within a set window. Many items have different windows (electronics, holiday season); start with the default window and say so in `summary`.
+- `store` is "amazon" | "walmart" | "other" today (`store_for` in `agent.py`); add "target"/"bestbuy" rows now so they work once we track those stores.
+- Always reply with a `PolicyResult` (unknown store → `ok=True, action="none"`, a `summary` saying to check the store's policy).
+- **Built** (`RULES` in `policy_agent.py`). Steps are tried in order; the first one still open gives `action` and `deadline` (purchase date + days). No purchase date → the first step, no deadline, and the window in days in `summary`. All closed → `action="none"`, "Return window closed …". Test: `uv run policy_agent.py --check walmart 98 80 2026-10-20` → `return_rebuy`, deadline 2027-01-18, "Return & rebuy by Jan 18 to save $18.00 (most electronics: 30 days)".
+
+  | Store | Steps | Source | Checked |
+  | --- | --- | --- | --- |
+  | amazon | goodwill credit, 30 days (no price-drop refunds; return & rebuy in the same window) | `amazon.com/gp/help/customer/display.html?nodeId=GKM69DUUYKQWKWX7` | 2026-10-24: 30 days |
+  | walmart | return & rebuy, 90 days (most electronics 30, said in `summary`) | `walmart.com/help/article/walmart-standard-return-policy/…` | 2026-10-24: 90 days, electronics 30 |
+  | target | price adjustment 14 days, then return & rebuy 90 days | `target.com/returns` | 2026-10-24: 90 days (Target brand 365). **14-day price match not read live yet** |
+  | bestbuy | price adjustment, 15 days | `bestbuy.com/site/help-topics/price-match-guarantee/…` | 2026-10-25: matches its own lower price "during the return and exchange period". **15-day return period not read live yet** |
+
+  Pages were read with Bright Data (MCP `search_engine` + `scrape_as_markdown`). The `where` links (store help/chat pages) haven't been opened yet.
+
+**Claim agent (`claim_agent.py`, Jiayi; port 8004, `CLAIM_AGENT_SEED`, mailbox)**
+- `asi1` writes the message: `AsyncOpenAI(api_key=ASI_ONE_API_KEY, base_url="https://api.asi1.ai/v1")`, `model="asi1"`, like `parser_agent.py`. Plain text, polite, under ~120 words, asks for the one thing in `action`, and uses **only the facts given** (item, prices, the difference, order number, purchase date, deadline). Never invent a policy, date, order number or promise.
+- Default when `action` is empty: Amazon → goodwill credit, Walmart → return & rebuy, other → price adjustment; with a default `where` per store (help/chat link).
+- Template fallback (no key, asi1 error, empty answer): a fixed message filled from the same facts, so the button always gives something usable.
+- uagents runs an agent's handlers one at a time: start the asi1 call in the background and return (copy `background()` from `price_agent.py`). Always reply with a `ClaimDraft`.
+- A `--check` CLI, e.g. `uv run claim_agent.py --check amazon "Ticonderoga pencils" 4.50 2.97`, prints one draft.
+
+**Coordinator side (Vinny, once an agent is ready)**
+- `store.py`: add `purchase_date` and `order_number` to `items` (an `ALTER TABLE` migration in `connect()`), filled from the receipt when an item is tracked from one (direct link, search pick or link form).
+- `show_price`: on a drop, send `PolicyCheck` if `POLICY_AGENT_ADDRESS` is set; `on_policy_result` saves it and sends the summary.
+- `price_detail`: a **Draft a refund request** button (`{"action": "draft_claim", "item_id"}`) on drops; `draft_claim` builds the `ClaimRequest`; `on_claim_draft` sends the two messages through `say()`.
+- Senders are checked (`POLICY_AGENT_ADDRESS`, `CLAIM_AGENT_ADDRESS`); until those are set, a labelled test result stands in.
+
+**Rules**
+- Never log the draft text or order numbers (item id, store, action and timing only).
+- The user sends every message; no agent contacts a store or logs into anything.
+- Don't state a deadline or policy the policy agent didn't return.
 
 ## Submission checklist
 
