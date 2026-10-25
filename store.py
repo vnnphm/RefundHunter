@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS items (
     price_paid    REAL NOT NULL,
     current_price REAL,
     checked_at    TEXT NOT NULL DEFAULT '',
-    added_at      TEXT NOT NULL
+    added_at      TEXT NOT NULL,
+    purchase_date TEXT NOT NULL DEFAULT '',  -- YYYY-MM-DD, from the receipt
+    order_number  TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS links (
     email     TEXT PRIMARY KEY,   -- lowercase
@@ -38,6 +40,10 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+    for col in ("purchase_date", "order_number"):  # added for refund requests; older databases lack them
+        if col not in have:
+            conn.execute(f"ALTER TABLE items ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
     return conn
 
 
@@ -46,14 +52,14 @@ def _now() -> str:
 
 
 def add_item(item_id: str, user_id: str, product_url: str, store: str,
-             price_paid: float, name: str = "") -> bool:
+             price_paid: float, name: str = "", purchase_date: str = "", order_number: str = "") -> bool:
     """Save a new item. Returns False if this item_id was already saved."""
     with connect() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO items (item_id, user_id, product_url, store, name,"
-            " price_paid, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " price_paid, added_at, purchase_date, order_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (item_id, user_id, product_url, store, name, price_paid,
-             datetime.now(timezone.utc).isoformat()))
+             datetime.now(timezone.utc).isoformat(), purchase_date, order_number))
         return cur.rowcount == 1
 
 

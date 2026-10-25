@@ -17,6 +17,8 @@ ASI_API = "https://api.asi1.ai/v1"
 MODEL = "asi1"
 MESSAGE_LIMIT = 1200  # store chat boxes cut long pastes
 MAX_JOBS = 4  # asi1 calls at once
+LLM_TIMEOUT_S = 30  # the client's default is 10 minutes per try; past this the template stands in
+COORDINATOR_ADDRESS = os.getenv("COORDINATOR_ADDRESS", "").strip()  # only it may ask for drafts
 
 ACTIONS = ("price_adjustment", "goodwill_credit", "return_rebuy")
 # Used when ClaimRequest.action is empty (no policy agent yet) or "none".
@@ -122,7 +124,7 @@ async def write_message(req: ClaimRequest, action: str) -> str:
     key = os.getenv("ASI_ONE_API_KEY", "")
     if not key:
         raise ClaimError("ASI_ONE_API_KEY is not set")
-    llm = AsyncOpenAI(api_key=key, base_url=ASI_API)
+    llm = AsyncOpenAI(api_key=key, base_url=ASI_API, timeout=LLM_TIMEOUT_S, max_retries=1)
     prompt = PROMPT.format(ask=ASK[action], facts="\n".join(facts(req)))
     try:
         r = await llm.chat.completions.create(
@@ -165,6 +167,9 @@ def background(coro):
 
 @agent.on_message(model=ClaimRequest, replies=ClaimDraft)
 async def on_claim_request(ctx: Context, sender: str, req: ClaimRequest):
+    if COORDINATOR_ADDRESS and sender != COORDINATOR_ADDRESS:  # each draft is an asi1 call
+        ctx.logger.warning(f"ignoring ClaimRequest from unexpected sender {sender}")
+        return
     background(answer_claim(ctx, sender, req))
 
 
