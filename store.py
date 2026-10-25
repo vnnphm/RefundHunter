@@ -85,6 +85,14 @@ def list_items(user_id: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def items_due(checked_before: str, limit: int) -> list[dict]:
+    """Items (any user) not price-checked since `checked_before` (ISO time), oldest first, for the price watch."""
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM items WHERE checked_at < ? ORDER BY checked_at LIMIT ?",
+                            (checked_before, limit))
+        return [dict(r) for r in rows]
+
+
 def link_email(email: str, user_id: str):
     """Point an email address at an ASI:One user. Re-linking moves it."""
     with connect() as conn:
