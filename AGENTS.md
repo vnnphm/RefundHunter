@@ -474,10 +474,10 @@ Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built
   | --- | --- | --- | --- |
   | amazon | goodwill credit, 30 days (no price-drop refunds; return & rebuy in the same window) | `amazon.com/gp/help/customer/display.html?nodeId=GKM69DUUYKQWKWX7` | 2026-10-24: 30 days |
   | walmart | return & rebuy, 90 days (most electronics 30, said in `summary`) | `walmart.com/help/article/walmart-standard-return-policy/…` | 2026-10-24: 90 days, electronics 30 |
-  | target | price adjustment 14 days, then return & rebuy 90 days | `target.com/returns` | 2026-10-24: 90 days (Target brand 365). **14-day price match not read live yet** |
-  | bestbuy | price adjustment, 15 days | `bestbuy.com/site/help-topics/price-match-guarantee/…` | 2026-10-25: matches its own lower price "during the return and exchange period". **15-day return period not read live yet** |
+  | target | price adjustment 14 days, then return & rebuy 90 days | `target.com/returns` | 2026-10-24: 90 days (Target brand 365). 2026-10-25: price match `target.com/help/articles/policies-guidelines/price-match-guarantee`, Target's own lower price within 14 days, original receipt required |
+  | bestbuy | price adjustment, 15 days | `bestbuy.com/site/help-topics/price-match-guarantee/…` | 2026-10-25: matches its own lower price "during the return and exchange period"; return period `bestbuy.com/site/help-topics/return-exchange-policy/…`: 15 days, My Best Buy Plus/Total 60, activatable devices (phones) 14 |
 
-  Pages were read with Bright Data (MCP `search_engine` + `scrape_as_markdown`). The `where` links (store help/chat pages) haven't been opened yet.
+  Pages were read with Bright Data (MCP `search_engine` + `scrape_as_markdown`); the 2026-10-25 Target price match and Best Buy return period rows were confirmed from the official pages through a web search (the sandbox couldn't open the store sites directly). The `where` links (store help/chat pages) haven't been opened yet.
 
 **Claim agent (`claim_agent.py`, Jiayi; port 8004, `CLAIM_AGENT_SEED`, mailbox)**
 - `asi1` writes the message: `AsyncOpenAI(api_key=ASI_ONE_API_KEY, base_url="https://api.asi1.ai/v1")`, `model="asi1"`, like `parser_agent.py`. Plain text, polite, under ~120 words, asks for the one thing in `action`, and uses **only the facts given** (item, prices, the difference, order number, purchase date, deadline). Never invent a policy, date, order number or promise.
