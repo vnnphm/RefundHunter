@@ -17,8 +17,8 @@ from uagents_core.contrib.protocols.chat import (
 
 import gmail
 import store
-from models import (ClaimDraft, ClaimRequest, FindProduct, FindResult, ParsedReceipt, PriceResult, ProductMatch,
-                    Receipt, TrackItem)
+from models import (ClaimDraft, ClaimRequest, FindProduct, FindResult, ParsedReceipt, PolicyCheck, PolicyResult,
+                    PriceResult, ProductMatch, Receipt, TrackItem)
 
 load_dotenv()
 
@@ -26,6 +26,8 @@ load_dotenv()
 PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 # Empty until the parser agent is running: the coordinator mocks ParsedReceipt instead.
 PARSER_AGENT_ADDRESS = os.getenv("PARSER_AGENT_ADDRESS", "").strip()
+# Empty until the policy agent is running: drop cards just leave out "what to do" and deadlines.
+POLICY_AGENT_ADDRESS = os.getenv("POLICY_AGENT_ADDRESS", "").strip()
 # Empty until the claim agent is running: "Draft a refund request" shows a labelled test draft instead.
 CLAIM_AGENT_ADDRESS = os.getenv("CLAIM_AGENT_ADDRESS", "").strip()
 # The email webhook (server.py); only it may send us Receipts.
@@ -180,7 +182,7 @@ def receipt_review(rec: dict, mock: bool) -> dict:
     }
 
 
-def price_detail(item: dict, mock: bool) -> dict:
+def price_detail(item: dict, mock: bool, policy: dict | None = None) -> dict:
     drop = item["price_paid"] - item["current_price"]
     rows = [
         {"label": "You paid", "value": f"${item['price_paid']:.2f}"},
@@ -189,6 +191,8 @@ def price_detail(item: dict, mock: bool) -> dict:
         {"label": "Store", "value": item["store"].title()},
         {"label": "Checked", "value": item["checked_at"][:16].replace("T", " ") + " UTC"},
     ]
+    if drop > 1 and (policy or {}).get("summary"):  # from the policy agent
+        rows.append({"label": "What to do", "value": policy["summary"][:140]})
     if mock:
         rows.append({"label": "Note", "value": "Test price: price agent not connected yet"})
     ctas = [{"label": "Track another item", "primary": drop <= 1,
@@ -375,6 +379,28 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
     drop = item["price_paid"] - item["current_price"]
     headline = f"Price dropped ${drop:.2f}!" if drop > 1 else "No price drop yet."
     await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
+    if drop > 1 and POLICY_AGENT_ADDRESS:  # what to ask for and by when; the answer follows the card
+        await ctx.send(POLICY_AGENT_ADDRESS, PolicyCheck(
+            item_id=item["item_id"], store=item["store"], purchase_date=item.get("purchase_date") or "",
+            price_paid=item["price_paid"], current_price=item["current_price"]))
+
+
+@agent.on_message(model=PolicyResult)
+async def on_policy_result(ctx: Context, sender: str, msg: PolicyResult):
+    if not POLICY_AGENT_ADDRESS or sender != POLICY_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring PolicyResult from unexpected sender {sender}")
+        return
+    item = store.get_item(msg.item_id)
+    if item is None or not msg.ok:
+        ctx.logger.info(f"policy {msg.item_id} not used: {msg.error or 'unknown item'}")
+        return
+    ctx.storage.set(f"policy:{msg.item_id}", {"action": msg.action, "deadline": msg.deadline,
+                                              "where": msg.where, "summary": msg.summary})
+    ctx.logger.info(f"policy {msg.item_id} [{item['store']}] {msg.action} deadline={msg.deadline or '-'}")
+    if msg.summary:
+        more = " Tap Draft a refund request on the card above and I'll write the message." \
+            if msg.action != "none" else ""
+        await say(ctx, item["user_id"], reply(f"What you can do: {msg.summary}.{more}"))
 
 
 @agent.on_message(model=PriceResult)
@@ -548,6 +574,16 @@ def test_draft(req: ClaimRequest) -> ClaimDraft:
                           f"${req.price_paid - req.current_price:.2f} difference? Thank you."))
 
 
+def short_date(value: str) -> str:
+    """'Jan 18' from YYYY-MM-DD (the year too when it isn't this year); the input if it isn't a date."""
+    try:
+        d = datetime.strptime(value[:10], "%Y-%m-%d")
+    except ValueError:
+        return value
+    year = f", {d.year}" if d.year != datetime.now(timezone.utc).year else ""
+    return f"{d:%b} {d.day}{year}"
+
+
 async def show_claim(ctx: Context, draft: ClaimDraft, mock: bool = False):
     """Where to send it, then the message alone so it copies cleanly."""
     if not draft.ok:
@@ -556,7 +592,7 @@ async def show_claim(ctx: Context, draft: ClaimDraft, mock: bool = False):
         return
     policy = ctx.storage.get(f"policy:{draft.item_id}") or {}  # from the policy agent, once it exists
     where = policy.get("where") or draft.where
-    by = f" by {policy['deadline']}" if policy.get("deadline") else ""
+    by = f" by {short_date(policy['deadline'])}" if policy.get("deadline") else ""
     note = " (test draft: the claim agent isn't connected yet)" if mock else ""
     ctx.logger.info(f"claim {draft.item_id}: {draft.action} draft for {draft.user_id}")  # never the text
     # The link goes last with nothing after it, so chat apps don't fold punctuation into the URL.
@@ -731,8 +767,8 @@ async def handle_text(ctx: Context, sender: str, text: str):
         elif item["current_price"] is None:
             await say(ctx, sender, reply("Still checking the price on that one. Try again in a moment."))
         else:
-            await say(ctx, sender, card(item["name"] or "Your item", "detail",
-                                        price_detail(item, mock=not PRICE_AGENT_ADDRESS)))
+            await say(ctx, sender, card(item["name"] or "Your item", "detail", price_detail(
+                item, mock=not PRICE_AGENT_ADDRESS, policy=ctx.storage.get(f"policy:{item['item_id']}"))))
     elif action == "upload_receipt":
         await say(ctx, sender, reply(
             "Attach a photo of your receipt with the paperclip button and send it."))
