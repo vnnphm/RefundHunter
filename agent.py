@@ -4,8 +4,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -18,6 +17,7 @@ from uagents_core.contrib.protocols.chat import (
 
 import gmail
 import store
+from agentverse_profile import profile
 from models import (ClaimDraft, ClaimRequest, FindProduct, FindResult, ParsedReceipt, PolicyCheck, PolicyResult,
                     PriceResult, ProductMatch, Receipt, TrackItem)
 
@@ -40,28 +40,21 @@ SEED = os.getenv("AGENT_SEED", "")
 if not SEED or SEED.startswith("change-me"):
     sys.exit("Set your own AGENT_SEED in .env (see README). Same seed = same address as someone else.")
 
-# uagents re-publishes these to the Agentverse profile on every start, so they live here: anything left
-# out would be sent empty and wipe what was set in the Agentverse dashboard.
-AVATAR_URL = "https://storage.googleapis.com/agentverse-prod-assets/agent-avatars-pub/257797515.jpg"
-DESCRIPTION = ("Finds money you're owed on past purchases. Connect Gmail or upload a receipt photo; Refund Hunter "
-               "tracks each item's price on Amazon and Walmart, tells you when it drops, and drafts the refund "
-               "request to paste into the store's chat.")
-
 agent = Agent(
     name="refund-hunter",
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8001,
     mailbox=True,
-    avatar_url=AVATAR_URL,
-    description=DESCRIPTION,
-    readme_path=str(Path(__file__).with_name("agent_profile.md")),
+    **profile("coordinator", "Finds money you're owed on past purchases. Connect Gmail or upload a receipt "
+                             "photo; Refund Hunter tracks each item's price on Amazon and Walmart, messages you "
+                             "when it drops, and drafts the refund request to paste into the store's chat."),
 )
 chat = Protocol(spec=chat_protocol_spec)
 
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 ITEM_ID_RE = re.compile(r"\bit_[0-9a-f]{8}\b")
 ACTION_RE = re.compile(r"\b(submit_item|add_item|upload_receipt|list_items|view_item|link_email"
-                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt|draft_claim)\b")
+                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt|draft_claim|recheck_item|check_prices)\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -206,13 +199,15 @@ def price_detail(item: dict, mock: bool, policy: dict | None = None) -> dict:
         rows.append({"label": "What to do", "value": policy["summary"][:140]})
     if mock:
         rows.append({"label": "Note", "value": "Test price: price agent not connected yet"})
-    ctas = [{"label": "Track another item", "primary": drop <= 1,
-             "selection": {"action": "add_item", "item_id": item["item_id"]}},
-            {"label": "See all items",
-             "selection": {"action": "list_items", "item_id": item["item_id"]}}]
+    again = {"label": "Check again", "primary": drop <= 1,
+             "selection": {"action": "recheck_item", "item_id": item["item_id"]}}
+    see_all = {"label": "See all items", "selection": {"action": "list_items", "item_id": item["item_id"]}}
     if drop > 1:  # the money step: a message to paste into the store's chat
-        ctas.insert(0, {"label": "Draft a refund request", "primary": True,
-                        "selection": {"action": "draft_claim", "item_id": item["item_id"]}})
+        ctas = [{"label": "Draft a refund request", "primary": True,
+                 "selection": {"action": "draft_claim", "item_id": item["item_id"]}}, again, see_all]
+    else:
+        ctas = [again, {"label": "Track another item",
+                        "selection": {"action": "add_item", "item_id": item["item_id"]}}, see_all]
     return {"title": item["name"] or "Your item", "summary_rows": rows, "ctas": ctas}
 
 
@@ -295,6 +290,8 @@ def parse_selection(text: str) -> dict:
         sel["action"] = named.group(1)
     elif re.search(r"\b(draft|claim|refund request)", lower):  # before submit_item: it may quote a price
         sel["action"] = "draft_claim"
+    elif re.search(r"\b(check|update|refresh)\w* (all |my |the )*prices?\b|\b(check again|re-?check)\b", lower):
+        sel["action"] = "recheck_item" if "item_id" in sel else "check_prices"
     elif "item_id" in sel and "price_paid" in sel:
         sel["action"] = "submit_item"
     elif "link" in lower and ("email" in lower or "email" in sel):
@@ -380,18 +377,96 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
         ctx.logger.warning(f"price for unknown item {result.item_id}")
         return
     user = item["user_id"]
+    quiet = ctx.storage.get(f"quiet:{item['item_id']}")  # a re-check from the watch or "check my prices"
+    if quiet:
+        ctx.storage.remove(f"quiet:{item['item_id']}")
     if not result.ok or not result.current_price or result.current_price <= 0:
         ctx.logger.info(f"price check failed for {result.item_id}: {result.error}")
-        await say(ctx, user, reply("Couldn't get the current price for that item. Try again later."))
+        if quiet:
+            await batch_done(ctx, quiet, failed=True)
+        else:
+            await say(ctx, user, reply("Couldn't get the current price for that item. Try again later."))
         return
+    before = item["current_price"]
     store.save_price(result.item_id, result.current_price,
                      result.checked_at or datetime.now(timezone.utc).isoformat(), result.title or "")
     item = store.get_item(result.item_id)
     drop = item["price_paid"] - item["current_price"]
+    if quiet:
+        # The watch speaks up only when the price fell since its last check; "check my prices" shows every drop.
+        fell = before is None or item["current_price"] < before - 0.005
+        tell = drop > 1 and (quiet["by"] == "user" or fell)
+        if tell:
+            headline = (f"Good news: {item['name'] or 'an item you bought'} dropped ${drop:.2f} below what you paid!"
+                        if quiet["by"] == "watch" else f"Price dropped ${drop:.2f}!")
+            ctx.logger.info(f"{quiet['by']} re-check {item['item_id']}: drop ${drop:.2f}, telling {user}")
+            await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
+            await ask_policy(ctx, item)
+        await batch_done(ctx, quiet, dropped=tell)
+        return
     headline = f"Price dropped ${drop:.2f}!" if drop > 1 else "No price drop yet."
     await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
     if drop > 1:
         await ask_policy(ctx, item)
+
+
+# ---- Re-checking prices: "Check again", "check my prices", and the price watch ----
+
+WATCH_HOURS = float(os.getenv("PRICE_WATCH_HOURS", "6") or 0)  # re-check items older than this; 0 = off
+WATCH_TICK_S = 600  # how often the watch looks for items due
+WATCH_BATCH = 5  # items per tick: spreads Bright Data credits (1 per check) and our messages
+CHECK_ALL_MAX = 10  # "check my prices" re-checks this many of the most recent items
+QUIET_TTL_S = 1800  # a re-check with no answer after this is retried
+
+
+async def recheck(ctx: Context, item: dict, by: str):
+    """Ask for a fresh price without the usual card; show_price decides whether to speak up."""
+    ctx.storage.set(f"quiet:{item['item_id']}", {"by": by, "user": item["user_id"], "at": time.time()})
+    await request_price(ctx, TrackItem(item_id=item["item_id"], user_id=item["user_id"],
+                                       product_url=item["product_url"], store=item["store"]))
+
+
+async def batch_done(ctx: Context, quiet: dict, dropped: bool = False, failed: bool = False):
+    """Count one answer of a "check my prices" batch; the last one sends the summary."""
+    if quiet.get("by") != "user":
+        return
+    key = f"batch:{quiet['user']}"
+    batch = ctx.storage.get(key)
+    if not batch:
+        return
+    batch["left"] -= 1
+    batch["drops"] += dropped
+    batch["failed"] += failed
+    if batch["left"] > 0:
+        ctx.storage.set(key, batch)
+        return
+    ctx.storage.remove(key)
+    n, drops, failed_n = batch["total"], batch["drops"], batch["failed"]
+    same = n - drops - failed_n
+    parts = ([f"{drops} dropped (above)"] if drops else []) + ([f"{same} no change"] if same else []) + \
+        ([f"{failed_n} couldn't be checked"] if failed_n else [])
+    watch = f" I'll keep checking every {WATCH_HOURS:g} hours and message you if one drops." \
+        if WATCH_HOURS > 0 and PRICE_AGENT_ADDRESS else ""
+    await say(ctx, quiet["user"], reply(f"Checked {n} item{'s' if n != 1 else ''}: {', '.join(parts)}.{watch}"))
+
+
+@agent.on_interval(period=WATCH_TICK_S)
+async def price_watch(ctx: Context):
+    """Re-check prices on a schedule and tell users only about new drops."""
+    if WATCH_HOURS <= 0 or not PRICE_AGENT_ADDRESS:
+        return
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=WATCH_HOURS)).isoformat()
+    sent = 0
+    for item in store.items_due(cutoff, WATCH_BATCH * 3):
+        busy = ctx.storage.get(f"quiet:{item['item_id']}")
+        if busy and time.time() - busy.get("at", 0) < QUIET_TTL_S:
+            continue  # already being re-checked
+        await recheck(ctx, item, "watch")
+        sent += 1
+        if sent == WATCH_BATCH:
+            break
+    if sent:
+        ctx.logger.info(f"price watch: re-checking {sent} item(s)")
 
 
 async def ask_policy(ctx: Context, item: dict):
@@ -757,6 +832,25 @@ async def handle_text(ctx: Context, sender: str, text: str):
                                         menu_card(len(store.pending_receipts(sender)))))
             return
         await say(ctx, sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
+    elif action == "recheck_item":
+        item = store.get_item(sel.get("item_id", ""))
+        if item is None or item["user_id"] != sender:
+            await say(ctx, sender, reply("I couldn't find that item. Say \"check my prices\" to re-check them all."))
+            return
+        ctx.storage.remove(f"quiet:{item['item_id']}")  # this one gets the full card
+        await say(ctx, sender, reply("Checking the price again…"))
+        await request_price(ctx, TrackItem(item_id=item["item_id"], user_id=sender,
+                                           product_url=item["product_url"], store=item["store"]))
+    elif action == "check_prices":
+        items = store.list_items(sender)[:CHECK_ALL_MAX]
+        if not items:
+            await say(ctx, sender, reply("You're not tracking anything yet. Add an item or upload a receipt."))
+            return
+        ctx.storage.set(f"batch:{sender}", {"total": len(items), "left": len(items), "drops": 0, "failed": 0})
+        await say(ctx, sender, reply(f"Checking {len(items)} item{'s' if len(items) != 1 else ''}… "
+                                     "I'll show any drops and then a summary."))
+        for item in items:
+            await recheck(ctx, item, "user")
     elif action == "draft_claim":
         item = store.get_item(sel.get("item_id", ""))
         if item is None or item["user_id"] != sender:

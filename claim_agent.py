@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from openai import APIError, AsyncOpenAI
 from uagents import Agent, Context
 
+from agentverse_profile import profile
 from models import ClaimDraft, ClaimRequest
 
 load_dotenv()
@@ -45,6 +46,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8004,
     mailbox=True,
+    **profile("claim", "Refund Hunter's claim writer. ASI:One (asi1) drafts a short, polite refund request for the shopper to paste into the store's chat, using only the facts it's given. Answers ClaimRequest with ClaimDraft."),
 )
 
 PROMPT = """You write a short message a shopper pastes into a store's customer service chat after

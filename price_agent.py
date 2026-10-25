@@ -10,6 +10,7 @@ import httpx
 from dotenv import load_dotenv
 from uagents import Agent, Context
 
+from agentverse_profile import profile
 from models import FindProduct, FindResult, PriceResult, ProductMatch, TrackItem
 
 load_dotenv()
@@ -36,6 +37,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8002,
     mailbox=True,
+    **profile("price", "Refund Hunter's price agent. Gets a product's live price on Amazon or Walmart with Bright Data's Scraper API, and finds a store's listing for a receipt item by its name. Answers TrackItem with PriceResult and FindProduct with FindResult."),
 )
 
 _cache: dict[str, tuple[float, float, str | None]] = {}  # url -> (time, price, title)

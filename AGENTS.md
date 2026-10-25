@@ -334,6 +334,14 @@ Confirm `{"url": ...}` against Step 0's `inputSchema`.
 - Skip the MCP `extract` tool: it relies on MCP sampling, which our client doesn't implement. Path C does the same job.
 - Never log the API key or a URL containing `?token=`.
 
+## Re-checking prices
+
+A price is first checked when an item is tracked. After that:
+- **Check again** (on every price card, `recheck_item`): a fresh check with the normal card.
+- **"check my prices"** (`check_prices`): re-checks the user's 10 most recent items; drops come back as cards, then one summary ("Checked 4 items: 1 dropped (above), 3 no change."). Good for showing a drop live in the demo.
+- **Price watch** (`price_watch`, `@agent.on_interval` every 10 min): re-checks up to 5 items whose last check is older than `PRICE_WATCH_HOURS` (default 6; 0 = off; needs `PRICE_AGENT_ADDRESS`). It messages the user **only when the price fell since its last check and is over $1 below what they paid** (card + policy message); no drop, the same old drop, or a failed check stay silent. Runs only while `agent.py` runs.
+- Re-checks mark the item `quiet:<item_id>` in `ctx.storage` so `show_price` knows not to send the usual card; a mark older than 30 min is retried. Each check is 1 Bright Data credit (the price agent's 10-minute cache absorbs repeats): 20 items every 6 hours is ~80 credits a day of the 5,000 a month.
+
 ## Receipt photos (Phase 2)
 
 Owner: Person A (receiving the photo, review card) and Person B (parser agent). Based on Fetch's [image analysis agent example](https://innovationlab.fetch.ai/resources/docs/examples/chat-protocol/image-analysis-agent) (docs v1.0.5) and the ASI:One API docs on image input.
@@ -502,7 +510,7 @@ Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built
 - [ ] README lists every agent's name and address, plus both badges:
   `![tag:innovationlab](https://img.shields.io/badge/innovationlab-3D8BD3)`
   `![tag:hackathon](https://img.shields.io/badge/hackathon-5F43F1)`
-- [ ] Each agent's Agentverse profile: clear name, description under 300 characters, example prompts
+- [x] Each agent's Agentverse profile: clear name, description under 300 characters, example prompts. Set in code: `Agent(..., **profile("<name>", "<description>"))` from `agentverse_profile.py`, readme in `profiles/<name>.md`. uagents re-publishes the profile on every start, so edits made only in the Agentverse dashboard get wiped: change these files instead.
 - [ ] Public ASI:One shared chat link showing the full flow
 - [ ] 3–5 minute demo video, Devpost, CalHacks ASI:One Submission Agent
 

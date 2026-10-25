@@ -14,6 +14,7 @@ from uagents import Agent, Context
 from uagents.communication import send_sync_message
 from uagents.resolver import RulesBasedResolver
 
+from agentverse_profile import profile
 from models import PolicyCheck, PolicyResult
 
 load_dotenv()
@@ -27,6 +28,7 @@ agent = Agent(
     seed=SEED,  # keep fixed: it sets the agent's address
     port=8005,
     mailbox=True,
+    **profile("policy", "Refund Hunter's policy agent. For a price drop, says which refund to ask for at Amazon, Walmart, Target or Best Buy (price adjustment, return & rebuy or goodwill credit) and the last day to ask. Answers PolicyCheck with PolicyResult."),
 )
 
 # One row per store. `steps` are tried in order: (action, days after purchase it's open).
