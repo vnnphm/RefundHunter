@@ -457,7 +457,7 @@ Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `4
 
 ## Refund requests (Phase 3)
 
-Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built:** the policy agent and the Phase 3 models. **Not yet:** the claim agent and the coordinator wiring.
+Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built:** `policy_agent.py`, `claim_agent.py` and the Phase 3 models in `models.py`. **Not yet:** the coordinator wiring.
 
 **Why.** Finding a drop isn't the money. Stores don't refund drops on their own, and returns can't be automated: they sit behind the user's login and change often. But store chats (Target, Best Buy, Amazon customer service) take a pasted message. So the last step is: **"Dropped $6.02" → tap "Draft a refund request" → where to send it, and a ready-to-paste message.** The user sends it; we never contact a store.
 
@@ -484,7 +484,8 @@ Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built
 - Default when `action` is empty: Amazon → goodwill credit, Walmart → return & rebuy, other → price adjustment; with a default `where` per store (help/chat link).
 - Template fallback (no key, asi1 error, empty answer): a fixed message filled from the same facts, so the button always gives something usable.
 - uagents runs an agent's handlers one at a time: start the asi1 call in the background and return (copy `background()` from `price_agent.py`). Always reply with a `ClaimDraft`.
-- A `--check` CLI, e.g. `uv run claim_agent.py --check amazon "Ticonderoga pencils" 4.50 2.97`, prints one draft.
+- A `--check` CLI, e.g. `uv run claim_agent.py --check amazon "Ticonderoga pencils" 4.50 2.97`, prints one draft Optional `[action] [deadline]` after the prices. Without `ASI_ONE_API_KEY` it prints the template.
+- Built as above. `action="none"` or unknown also gets the store default. `where` is always the default per store (`ClaimRequest` has no `where`), so the coordinator should prefer the saved `PolicyResult.where`. A price that hasn't dropped → `ok=False`.
 
 **Coordinator side (Vinny, once an agent is ready)**
 - `store.py`: add `purchase_date` and `order_number` to `items` (an `ALTER TABLE` migration in `connect()`), filled from the receipt when an item is tracked from one (direct link, search pick or link form).

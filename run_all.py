@@ -1,7 +1,7 @@
 """Start every agent with one command: uv run run_all.py
 
 Creates .env from .env.example if needed, fills in missing seeds and agent addresses,
-then runs the price, policy, parser and coordinator agents together. Ctrl+C stops them all.
+then runs the price, policy, parser, claim and coordinator agents together. Ctrl+C stops them all.
 A worker whose address in .env doesn't come from its seed here is a teammate's agent: it isn't started.
 """
 import os
@@ -24,6 +24,7 @@ AGENTS = [
     ("price", "price_agent.py", "PRICE_AGENT_SEED", "PRICE_AGENT_ADDRESS"),
     ("policy", "policy_agent.py", "POLICY_AGENT_SEED", "POLICY_AGENT_ADDRESS"),
     ("parser", "parser_agent.py", "PARSER_AGENT_SEED", "PARSER_AGENT_ADDRESS"),
+    ("claim", "claim_agent.py", "CLAIM_AGENT_SEED", "CLAIM_AGENT_ADDRESS"),
     ("coordinator", "agent.py", "AGENT_SEED", "COORDINATOR_ADDRESS"),
 ]
 KEYS = ["BRIGHTDATA_API_TOKEN", "ASI_ONE_API_KEY"]

@@ -8,7 +8,7 @@
 uv run run_all.py
 ```
 
-The first run creates `.env`, makes your own seeds, and saves every agent address in it. If `.env` already has a teammate's `PRICE_AGENT_ADDRESS` or `PARSER_AGENT_ADDRESS`, that agent isn't started here and the coordinator uses theirs. Paste your `BRIGHTDATA_API_TOKEN` and `ASI_ONE_API_KEY` into `.env` (click it in VS Code's file list), save, and run the command again. It starts the price, policy, parser and coordinator agents and prints their addresses. Open each "Agent inspector available at" link in Chrome or Brave, then Connect → Mailbox → Finish. Ctrl+C stops all of them. Then @mention the coordinator address in ASI:One.
+The first run creates `.env`, makes your own seeds, and saves every agent address in it. If `.env` already has a teammate's address for an agent (for example `PRICE_AGENT_ADDRESS`), that agent isn't started here and the coordinator uses theirs. Paste your `BRIGHTDATA_API_TOKEN` and `ASI_ONE_API_KEY` into `.env` (click it in VS Code's file list), save, and run the command again. It starts the price, policy, parser, claim and coordinator agents and prints their addresses. Open each "Agent inspector available at" link in Chrome or Brave, then Connect → Mailbox → Finish. Ctrl+C stops all of them. Then @mention the coordinator address in ASI:One.
 
 **Step by step instead:**
 
