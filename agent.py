@@ -390,7 +390,13 @@ async def show_price(ctx: Context, result: PriceResult, mock: bool = False):
     drop = item["price_paid"] - item["current_price"]
     headline = f"Price dropped ${drop:.2f}!" if drop > 1 else "No price drop yet."
     await say(ctx, user, card(headline, "detail", price_detail(item, mock)))
-    if drop > 1 and POLICY_AGENT_ADDRESS:  # what to ask for and by when; the answer follows the card
+    if drop > 1:
+        await ask_policy(ctx, item)
+
+
+async def ask_policy(ctx: Context, item: dict):
+    """What to ask for and by when; the policy agent's answer follows the card as a message."""
+    if POLICY_AGENT_ADDRESS:
         await ctx.send(POLICY_AGENT_ADDRESS, PolicyCheck(
             item_id=item["item_id"], store=item["store"], purchase_date=item.get("purchase_date") or "",
             price_paid=item["price_paid"], current_price=item["current_price"]))
@@ -778,8 +784,11 @@ async def handle_text(ctx: Context, sender: str, text: str):
         elif item["current_price"] is None:
             await say(ctx, sender, reply("Still checking the price on that one. Try again in a moment."))
         else:
+            policy = ctx.storage.get(f"policy:{item['item_id']}")
             await say(ctx, sender, card(item["name"] or "Your item", "detail", price_detail(
-                item, mock=not PRICE_AGENT_ADDRESS, policy=ctx.storage.get(f"policy:{item['item_id']}"))))
+                item, mock=not PRICE_AGENT_ADDRESS, policy=policy)))
+            if policy is None and item["price_paid"] - item["current_price"] > 1:
+                await ask_policy(ctx, item)  # dropped before the policy agent was connected
     elif action == "upload_receipt":
         await say(ctx, sender, reply(
             "Attach a photo of your receipt with the paperclip button and send it."))
