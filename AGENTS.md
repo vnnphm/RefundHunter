@@ -24,7 +24,7 @@ Each agent is one file, one job, one seed. Only the coordinator talks to users.
 | Policy agent | `policy_agent.py` | 3 | Which request makes sense for this store, and the deadline (rules, no LLM) | `PolicyCheck` | `PolicyResult` |
 | Claim writer | `claim_agent.py` | 3 | Drafts the refund request the user pastes into the store's chat | `ClaimRequest` | `ClaimDraft` |
 
-Not agents: `store.py` (SQLite, shared state), `server.py` (FastAPI: Gmail connect, plus an optional forwarding webhook), `gmail.py` (Google OAuth + Gmail API), Bright Data.
+Not agents: `store.py` (SQLite, shared state), `asi.py` (`asi1` JSON calls, used by the parser), `run_all.py` (starts every agent with one command), `server.py` (FastAPI: Gmail connect, plus an optional forwarding webhook), `gmail.py` (Google OAuth + Gmail API), Bright Data.
 
 **Flow (Phase 1):** user → coordinator → saves item → `TrackItem` → price agent → Bright Data → `PriceResult` → coordinator → saves price → detail card to user.
 
@@ -115,7 +115,7 @@ class FindResult(Model):      # price agent -> coordinator
 
 A price counts as dropped when `price_paid - current_price > 1` and `ok` is true.
 
-**Phase 3 (proposed: agree before building, then add to `models.py`):**
+**Phase 3 (agreed, in `models.py`):**
 ```python
 class PolicyCheck(Model):     # coordinator -> policy agent, when a drop is found
     item_id: str
@@ -457,7 +457,7 @@ Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `4
 
 ## Refund requests (Phase 3)
 
-Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. Built: `claim_agent.py` (with `ClaimRequest`/`ClaimDraft` in `models.py`); the rest isn't yet.
+Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. **Built:** `policy_agent.py`, `claim_agent.py` and the Phase 3 models in `models.py`. **Not yet:** the coordinator wiring.
 
 **Why.** Finding a drop isn't the money. Stores don't refund drops on their own, and returns can't be automated: they sit behind the user's login and change often. But store chats (Target, Best Buy, Amazon customer service) take a pasted message. So the last step is: **"Dropped $6.02" → tap "Draft a refund request" → where to send it, and a ready-to-paste message.** The user sends it; we never contact a store.
 
@@ -468,6 +468,16 @@ Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. Built: 
 - What we know so far (**verify each against the store's current policy page, and put that URL and the date checked in the table**): Amazon and Walmart don't refund price drops after purchase, so the options are return & rebuy within the return window, or (Amazon) asking customer service for a goodwill credit, which isn't guaranteed. Target and Best Buy offer price adjustments within a set window. Many items have different windows (electronics, holiday season); start with the default window and say so in `summary`.
 - `store` is "amazon" | "walmart" | "other" today (`store_for` in `agent.py`); add "target"/"bestbuy" rows now so they work once we track those stores.
 - Always reply with a `PolicyResult` (unknown store → `ok=True, action="none"`, a `summary` saying to check the store's policy).
+- **Built** (`RULES` in `policy_agent.py`). Steps are tried in order; the first one still open gives `action` and `deadline` (purchase date + days). No purchase date → the first step, no deadline, and the window in days in `summary`. All closed → `action="none"`, "Return window closed …". Test: `uv run policy_agent.py --check walmart 98 80 2026-10-20` → `return_rebuy`, deadline 2027-01-18, "Return & rebuy by Jan 18 to save $18.00 (most electronics: 30 days)". `--send` (same arguments) sends that `PolicyCheck` to the agent running on this machine (straight to port 8005, no mailbox) and prints the `PolicyResult` it replies with.
+
+  | Store | Steps | Source | Checked |
+  | --- | --- | --- | --- |
+  | amazon | goodwill credit, 30 days (no price-drop refunds; return & rebuy in the same window) | `amazon.com/gp/help/customer/display.html?nodeId=GKM69DUUYKQWKWX7` | 2026-10-24: 30 days |
+  | walmart | return & rebuy, 90 days (most electronics 30, said in `summary`) | `walmart.com/help/article/walmart-standard-return-policy/…` | 2026-10-24: 90 days, electronics 30 |
+  | target | price adjustment 14 days, then return & rebuy 90 days | `target.com/returns` | 2026-10-24: 90 days (Target brand 365). **14-day price match not read live yet** |
+  | bestbuy | price adjustment, 15 days | `bestbuy.com/site/help-topics/price-match-guarantee/…` | 2026-10-25: matches its own lower price "during the return and exchange period". **15-day return period not read live yet** |
+
+  Pages were read with Bright Data (MCP `search_engine` + `scrape_as_markdown`). The `where` links (store help/chat pages) haven't been opened yet.
 
 **Claim agent (`claim_agent.py`, Jiayi; port 8004, `CLAIM_AGENT_SEED`, mailbox)**
 - `asi1` writes the message: `AsyncOpenAI(api_key=ASI_ONE_API_KEY, base_url="https://api.asi1.ai/v1")`, `model="asi1"`, like `parser_agent.py`. Plain text, polite, under ~120 words, asks for the one thing in `action`, and uses **only the facts given** (item, prices, the difference, order number, purchase date, deadline). Never invent a policy, date, order number or promise.
