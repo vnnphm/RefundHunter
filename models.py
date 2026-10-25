@@ -67,6 +67,26 @@ class FindResult(Model):      # price agent -> coordinator
     error: Optional[str] = None
 
 
+# Phase 3: refund requests (see "Refund requests" in AGENTS.md)
+class PolicyCheck(Model):     # coordinator -> policy agent, when a drop is found
+    item_id: str
+    store: str                # "amazon" | "walmart" | "other" today; "target" | "bestbuy" later
+    purchase_date: str = ""   # YYYY-MM-DD; "" if unknown (item added by hand)
+    price_paid: float
+    current_price: float
+
+
+class PolicyResult(Model):    # policy agent -> coordinator
+    item_id: str
+    ok: bool
+    action: str = "none"      # "price_adjustment" | "goodwill_credit" | "return_rebuy" | "none"
+    deadline: str = ""        # YYYY-MM-DD, last day to act; "" if the purchase date is unknown
+    where: str = ""           # how to reach the store, with its help/chat link
+    summary: str = ""         # one line for the card, e.g. "Return & rebuy by Nov 12 to save $6.02"
+    source_url: str = ""      # the policy page the rule comes from
+    error: Optional[str] = None
+
+
 class ClaimRequest(Model):    # coordinator -> claim agent, when the user taps "Draft a refund request"
     item_id: str
     user_id: str
