@@ -17,7 +17,8 @@ from uagents_core.contrib.protocols.chat import (
 
 import gmail
 import store
-from models import FindProduct, FindResult, ParsedReceipt, PriceResult, ProductMatch, Receipt, TrackItem
+from models import (ClaimDraft, ClaimRequest, FindProduct, FindResult, ParsedReceipt, PriceResult, ProductMatch,
+                    Receipt, TrackItem)
 
 load_dotenv()
 
@@ -25,6 +26,8 @@ load_dotenv()
 PRICE_AGENT_ADDRESS = os.getenv("PRICE_AGENT_ADDRESS", "").strip()
 # Empty until the parser agent is running: the coordinator mocks ParsedReceipt instead.
 PARSER_AGENT_ADDRESS = os.getenv("PARSER_AGENT_ADDRESS", "").strip()
+# Empty until the claim agent is running: "Draft a refund request" shows a labelled test draft instead.
+CLAIM_AGENT_ADDRESS = os.getenv("CLAIM_AGENT_ADDRESS", "").strip()
 # The email webhook (server.py); only it may send us Receipts.
 SERVER_ADDRESS = os.getenv("SERVER_ADDRESS", "").strip()
 # Shared Pipedream address users forward order emails to.
@@ -45,7 +48,7 @@ chat = Protocol(spec=chat_protocol_spec)
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 ITEM_ID_RE = re.compile(r"\bit_[0-9a-f]{8}\b")
 ACTION_RE = re.compile(r"\b(submit_item|add_item|upload_receipt|list_items|view_item|link_email"
-                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt)\b")
+                       r"|connect_gmail|check_receipts|track_receipt|dismiss_receipt|draft_claim)\b")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
@@ -121,7 +124,7 @@ def menu_card(pending: int = 0) -> dict:
 
 
 def add_item_form(item_id: str, product_url: str = "", price_paid: float | None = None,
-                  name: str = "") -> dict:
+                  name: str = "", receipt: str = "") -> dict:
     """Asks only for what we don't already know: the link, the price paid, the name."""
     fields = [] if product_url else [
         {"name": "product_url", "kind": "text", "label": "Product link", "required": True}]
@@ -138,6 +141,8 @@ def add_item_form(item_id: str, product_url: str = "", price_paid: float | None 
         selection["price_paid"] = price_paid
     if name:
         selection["name"] = name
+    if receipt:  # so the item keeps the receipt's purchase date and order number
+        selection["receipt"] = receipt
     return {
         "title": f"Track: {name[:60]}" if name else "Track an item",
         "fields": fields,
@@ -186,14 +191,14 @@ def price_detail(item: dict, mock: bool) -> dict:
     ]
     if mock:
         rows.append({"label": "Note", "value": "Test price: price agent not connected yet"})
-    return {
-        "title": item["name"] or "Your item",
-        "summary_rows": rows,
-        "ctas": [{"label": "Track another item", "primary": True,
-                  "selection": {"action": "add_item", "item_id": item["item_id"]}},
-                 {"label": "See all items",
-                  "selection": {"action": "list_items", "item_id": item["item_id"]}}],
-    }
+    ctas = [{"label": "Track another item", "primary": drop <= 1,
+             "selection": {"action": "add_item", "item_id": item["item_id"]}},
+            {"label": "See all items",
+             "selection": {"action": "list_items", "item_id": item["item_id"]}}]
+    if drop > 1:  # the money step: a message to paste into the store's chat
+        ctas.insert(0, {"label": "Draft a refund request", "primary": True,
+                        "selection": {"action": "draft_claim", "item_id": item["item_id"]}})
+    return {"title": item["name"] or "Your item", "summary_rows": rows, "ctas": ctas}
 
 
 def items_carousel(items: list[dict]) -> dict:
@@ -224,7 +229,8 @@ def items_carousel(items: list[dict]) -> dict:
 SEARCHABLE = ("amazon", "walmart")  # stores the price agent can search by item name
 
 
-def match_carousel(item_id: str, name: str, price_paid: float, matches: list, shop: str = "amazon") -> dict:
+def match_carousel(item_id: str, name: str, price_paid: float, matches: list, shop: str = "amazon",
+                   receipt: str = "") -> dict:
     """Store search results for a receipt item; tapping one tracks it like a filled-in form."""
     tiles = []
     for m in matches:
@@ -240,7 +246,7 @@ def match_carousel(item_id: str, name: str, price_paid: float, matches: list, sh
             "secondary_text": f"Now ${m.price:.2f}" if m.price else "Price unknown",
             "primary_cta": {"label": "This one", "selection": {
                 "action": "submit_item", "item_id": item_id, "product_url": m.product_url,
-                "price_paid": price_paid, "name": name}},
+                "price_paid": price_paid, "name": name, **({"receipt": receipt} if receipt else {})}},
         })
     return {"title": f"Which one is {name[:50]}?", "subtitle": f"You paid ${price_paid:.2f}", "items": tiles}
 
@@ -272,6 +278,8 @@ def parse_selection(text: str) -> dict:
         sel["email"] = m.group(0)
     if named:
         sel["action"] = named.group(1)
+    elif re.search(r"\b(draft|claim|refund request)", lower):  # before submit_item: it may quote a price
+        sel["action"] = "draft_claim"
     elif "item_id" in sel and "price_paid" in sel:
         sel["action"] = "submit_item"
     elif "link" in lower and ("email" in lower or "email" in sel):
@@ -477,11 +485,12 @@ async def on_find_result(ctx: Context, sender: str, msg: FindResult):
 async def show_matches(ctx: Context, user: str, item_id: str, wanted: dict, ok: bool,
                        matches: list, error: str | None):
     name, paid, shop = wanted["name"], wanted["price_paid"], wanted.get("store", "amazon")
-    form = add_item_form(item_id, "", paid, name)
+    receipt = wanted.get("receipt", "")
+    form = add_item_form(item_id, "", paid, name, receipt)
     if ok and matches:
         ctx.logger.info(f"search {item_id}: {len(matches)} match(es) for {user}")
         await say(ctx, user, card(f"Which one did you buy? You paid ${paid:.2f}.", "carousel",
-                                  match_carousel(item_id, name, paid, matches, shop)))
+                                  match_carousel(item_id, name, paid, matches, shop, receipt)))
         await say(ctx, user, card("Not listed? Paste the link.", "form", form))
     else:
         ctx.logger.info(f"search {item_id} found nothing: {error or 'no matches'}")
@@ -493,10 +502,10 @@ def searchable(rec: dict, it: dict) -> bool:
     return bool(PRICE_AGENT_ADDRESS) and rec["store"] in SEARCHABLE and not valid_url(it["product_url"])
 
 
-async def start_search(ctx: Context, user: str, it: dict, shop: str, approved: bool) -> str:
+async def start_search(ctx: Context, user: str, it: dict, shop: str, approved: bool, receipt: str = "") -> str:
     item_id = new_item_id()
     ctx.storage.set(f"find:{item_id}", {"name": it["name"], "price_paid": it["price_paid"],
-                                        "store": shop, "approved": approved})
+                                        "store": shop, "approved": approved, "receipt": receipt})
     await ctx.send(PRICE_AGENT_ADDRESS, FindProduct(item_id=item_id, user_id=user, query=it["name"], store=shop))
     return item_id
 
@@ -507,7 +516,8 @@ async def presearch(ctx: Context, rec: dict):
     todo = [(i, it) for i, it in enumerate(rec["items"]) if searchable(rec, it)]
     if not todo or ctx.storage.has(key):
         return
-    ctx.storage.set(key, {str(i): await start_search(ctx, rec["user_id"], it, rec["store"], approved=False)
+    ctx.storage.set(key, {str(i): await start_search(ctx, rec["user_id"], it, rec["store"], approved=False,
+                                                     receipt=rec["message_id"])
                           for i, it in todo})
 
 
@@ -515,6 +525,51 @@ def forget_presearch(ctx: Context, message_id: str):
     for item_id in (ctx.storage.get(f"pre:{message_id}") or {}).values():
         ctx.storage.remove(f"find:{item_id}")
     ctx.storage.remove(f"pre:{message_id}")
+
+
+# ---- Refund requests (claim agent) -------------------------------------------
+
+def claim_request(item: dict, policy: dict) -> ClaimRequest:
+    return ClaimRequest(
+        item_id=item["item_id"], user_id=item["user_id"], store=item["store"],
+        item_name=item["name"] or "this item", product_url=item["product_url"],
+        price_paid=item["price_paid"], current_price=item["current_price"],
+        purchase_date=item.get("purchase_date") or "", order_number=item.get("order_number") or "",
+        action=policy.get("action", ""), deadline=policy.get("deadline", ""))
+
+
+def test_draft(req: ClaimRequest) -> ClaimDraft:
+    """Stands in until the claim agent is connected; the reply says it's a test."""
+    order = f" (order {req.order_number})" if req.order_number else ""
+    return ClaimDraft(item_id=req.item_id, user_id=req.user_id, ok=True, action="price_adjustment",
+                      where="the store's customer service chat", message=(
+                          f"Hi, I bought {req.item_name}{order} for ${req.price_paid:.2f}. It's now "
+                          f"${req.current_price:.2f}. Could I get a refund of the "
+                          f"${req.price_paid - req.current_price:.2f} difference? Thank you."))
+
+
+async def show_claim(ctx: Context, draft: ClaimDraft, mock: bool = False):
+    """Where to send it, then the message alone so it copies cleanly."""
+    if not draft.ok:
+        ctx.logger.info(f"claim {draft.item_id} failed: {draft.error}")
+        await say(ctx, draft.user_id, reply("I couldn't write that request right now. Try again in a minute."))
+        return
+    policy = ctx.storage.get(f"policy:{draft.item_id}") or {}  # from the policy agent, once it exists
+    where = policy.get("where") or draft.where
+    by = f" by {policy['deadline']}" if policy.get("deadline") else ""
+    note = " (test draft: the claim agent isn't connected yet)" if mock else ""
+    ctx.logger.info(f"claim {draft.item_id}: {draft.action} draft for {draft.user_id}")  # never the text
+    # The link goes last with nothing after it, so chat apps don't fold punctuation into the URL.
+    await say(ctx, draft.user_id, reply(f"Here's your refund request{note}. Paste the next message{by} into {where}"))
+    await say(ctx, draft.user_id, reply(draft.message))
+
+
+@agent.on_message(model=ClaimDraft)
+async def on_claim_draft(ctx: Context, sender: str, msg: ClaimDraft):
+    if not CLAIM_AGENT_ADDRESS or sender != CLAIM_AGENT_ADDRESS:
+        ctx.logger.warning(f"ignoring ClaimDraft from unexpected sender {sender}")
+        return
+    await show_claim(ctx, msg)
 
 
 def find_receipt(sender: str, sel: dict, text: str) -> dict | None:
@@ -540,10 +595,12 @@ async def show_pending(ctx: Context, sender: str, intro: str = "Want me to track
 # ---- Handlers ----------------------------------------------------------------
 
 async def track_new_item(ctx: Context, sender: str, url: str, price: float, name: str,
-                         item_id: str | None = None):
+                         item_id: str | None = None, receipt: dict | None = None):
     item_id = item_id or new_item_id()
     shop = store_for(url)
-    if not store.add_item(item_id, sender, url, shop, price, name):
+    rec = receipt or {}
+    if not store.add_item(item_id, sender, url, shop, price, name,
+                          rec.get("purchase_date", ""), rec.get("order_number", "")):
         await say(ctx, sender, reply("That item is already being tracked."))
         return
     ctx.logger.info(f"saved {item_id} ({shop}) for {sender}")
@@ -564,7 +621,9 @@ async def handle_text(ctx: Context, sender: str, text: str):
                 "I need a full product link (starting with https://) and the price you paid.",
                 "form", add_item_form(item_id, url if valid_url(url) else "")))
             return
-        await track_new_item(ctx, sender, url, price, str(sel.get("name") or "").strip(), item_id)
+        rec = store.get_receipt(str(sel.get("receipt") or ""))
+        await track_new_item(ctx, sender, url, price, str(sel.get("name") or "").strip(), item_id,
+                             rec if rec and rec["user_id"] == sender else None)
     elif action == "link_email":
         email = (sel.get("email") or "").strip()
         if not EMAIL_RE.fullmatch(email):
@@ -604,7 +663,7 @@ async def handle_text(ctx: Context, sender: str, text: str):
         ctx.storage.remove(f"pre:{rec['message_id']}")
         for i, it in enumerate(rec["items"]):
             if valid_url(it["product_url"]):
-                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"])
+                await track_new_item(ctx, sender, it["product_url"], it["price_paid"], it["name"], receipt=rec)
             elif searchable(rec, it):  # search for it, user picks
                 item_id = early.get(str(i))
                 wanted = ctx.storage.get(f"find:{item_id}") if item_id else None
@@ -619,10 +678,11 @@ async def handle_text(ctx: Context, sender: str, text: str):
                     await say(ctx, sender, reply(f"Still looking up {it['name'][:60]} on {shop}…"))
                 else:
                     await say(ctx, sender, reply(f"Looking up {it['name'][:60]} on {shop}…"))
-                    await start_search(ctx, sender, it, rec["store"], approved=True)
+                    await start_search(ctx, sender, it, rec["store"], approved=True, receipt=rec["message_id"])
             else:  # paper receipts and some emails have no product link
                 await say(ctx, sender, card(f"What's the product link for {it['name'][:60]}?", "form",
-                                            add_item_form(new_item_id(), "", it["price_paid"], it["name"])))
+                                            add_item_form(new_item_id(), "", it["price_paid"], it["name"],
+                                                          rec["message_id"])))
     elif action == "dismiss_receipt":
         rec = find_receipt(sender, sel, text)
         if rec is None and store.pending_receipts(sender):
@@ -644,6 +704,26 @@ async def handle_text(ctx: Context, sender: str, text: str):
                                         menu_card(len(store.pending_receipts(sender)))))
             return
         await say(ctx, sender, card("Here's everything you're tracking.", "carousel", items_carousel(items)))
+    elif action == "draft_claim":
+        item = store.get_item(sel.get("item_id", ""))
+        if item is None or item["user_id"] != sender:
+            drops = [it for it in store.list_items(sender)
+                     if it["current_price"] is not None and it["price_paid"] - it["current_price"] > 1]
+            if len(drops) != 1:  # prose without an item id: don't guess between items
+                await say(ctx, sender, reply("Which item? Open it from My items and tap Draft a refund request."
+                                             if drops else "None of your items has dropped in price yet."))
+                return
+            item = drops[0]
+        if item["current_price"] is None or item["price_paid"] - item["current_price"] <= 1:
+            await say(ctx, sender, reply("That one hasn't dropped in price, so there's nothing to ask for yet."))
+            return
+        req = claim_request(item, ctx.storage.get(f"policy:{item['item_id']}") or {})
+        if CLAIM_AGENT_ADDRESS:
+            ctx.logger.info(f"claim {item['item_id']} [{item['store']}] -> claim agent")
+            await say(ctx, sender, reply("Writing your refund request…"))
+            await ctx.send(CLAIM_AGENT_ADDRESS, req)
+        else:
+            await show_claim(ctx, test_draft(req), mock=True)
     elif action == "view_item":
         item = store.get_item(sel.get("item_id", ""))
         if item is None or item["user_id"] != sender:

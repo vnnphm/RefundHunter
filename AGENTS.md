@@ -457,7 +457,7 @@ Step errors: `401` secret mismatch (redeploy Vercel after changing env vars), `4
 
 ## Refund requests (Phase 3)
 
-Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. Built: `claim_agent.py` (with `ClaimRequest`/`ClaimDraft` in `models.py`); the rest isn't yet.
+Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. Built: `claim_agent.py` (with `ClaimRequest`/`ClaimDraft` in `models.py`) and the coordinator side for it. The policy agent isn't yet; everything works without it (no deadlines are stated).
 
 **Why.** Finding a drop isn't the money. Stores don't refund drops on their own, and returns can't be automated: they sit behind the user's login and change often. But store chats (Target, Best Buy, Amazon customer service) take a pasted message. So the last step is: **"Dropped $6.02" → tap "Draft a refund request" → where to send it, and a ready-to-paste message.** The user sends it; we never contact a store.
 
@@ -475,13 +475,12 @@ Owners: policy agent MM77a, claim agent Jiayi, coordinator wiring Vinny. Built: 
 - Template fallback (no key, asi1 error, empty answer): a fixed message filled from the same facts, so the button always gives something usable.
 - uagents runs an agent's handlers one at a time: start the asi1 call in the background and return (copy `background()` from `price_agent.py`). Always reply with a `ClaimDraft`.
 - A `--check` CLI, e.g. `uv run claim_agent.py --check amazon "Ticonderoga pencils" 4.50 2.97`, prints one draft Optional `[action] [deadline]` after the prices. Without `ASI_ONE_API_KEY` it prints the template.
-- Built as above. `action="none"` or unknown also gets the store default. `where` is always the default per store (`ClaimRequest` has no `where`), so the coordinator should prefer the saved `PolicyResult.where`. A price that hasn't dropped → `ok=False`.
+- Built as above. `action="none"` or unknown also gets the store default. `where` is always the default per store (`ClaimRequest` has no `where`), so the coordinator should prefer the saved `PolicyResult.where`. A price that hasn't dropped → `ok=False`. asi1 calls time out after 30 s (`LLM_TIMEOUT_S`, one retry) and fall back to the template. With `COORDINATOR_ADDRESS` set, only the coordinator may ask for drafts.
 
-**Coordinator side (Vinny, once an agent is ready)**
-- `store.py`: add `purchase_date` and `order_number` to `items` (an `ALTER TABLE` migration in `connect()`), filled from the receipt when an item is tracked from one (direct link, search pick or link form).
-- `show_price`: on a drop, send `PolicyCheck` if `POLICY_AGENT_ADDRESS` is set; `on_policy_result` saves it and sends the summary.
-- `price_detail`: a **Draft a refund request** button (`{"action": "draft_claim", "item_id"}`) on drops; `draft_claim` builds the `ClaimRequest`; `on_claim_draft` sends the two messages through `say()`.
-- Senders are checked (`POLICY_AGENT_ADDRESS`, `CLAIM_AGENT_ADDRESS`); until those are set, a labelled test result stands in.
+**Coordinator side (Vinny)**
+- Built: `store.py` has `purchase_date` and `order_number` on `items` (an `ALTER TABLE` migration in `connect()` for older databases), filled from the receipt when an item is tracked from one: direct link, search pick or link form all carry the receipt id (`"receipt"` in the selection; only the sender's own receipt is used).
+- Built: `price_detail` shows **Draft a refund request** (`{"action": "draft_claim", "item_id"}`) on drops, first and primary. `draft_claim` checks the item is the sender's and has dropped (prose without an item id drafts only when exactly one item has dropped), builds the `ClaimRequest` (plus `policy:<item_id>` from storage if present) and sends it to `CLAIM_AGENT_ADDRESS`; without that address a labelled test draft stands in. `on_claim_draft` (sender checked) sends "Paste the next message into {where}", then the message alone, through `say()`.
+- To do with the policy agent: `show_price` sends `PolicyCheck` on a drop if `POLICY_AGENT_ADDRESS` is set; `on_policy_result` (sender checked) saves it under `policy:<item_id>` and sends the summary. `draft_claim` and `show_claim` already read that entry.
 
 **Rules**
 - Never log the draft text or order numbers (item id, store, action and timing only).
