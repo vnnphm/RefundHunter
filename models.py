@@ -65,3 +65,27 @@ class FindResult(Model):      # price agent -> coordinator
     ok: bool
     matches: list[ProductMatch] = []
     error: Optional[str] = None
+
+
+class ClaimRequest(Model):    # coordinator -> claim agent, when the user taps "Draft a refund request"
+    item_id: str
+    user_id: str
+    store: str
+    item_name: str
+    product_url: str = ""
+    price_paid: float
+    current_price: float
+    purchase_date: str = ""   # YYYY-MM-DD, from the receipt
+    order_number: str = ""
+    action: str = ""          # from PolicyResult; "" = the claim agent picks its default for the store
+    deadline: str = ""        # from PolicyResult; never guessed
+
+
+class ClaimDraft(Model):      # claim agent -> coordinator
+    item_id: str
+    user_id: str
+    ok: bool
+    action: str = ""
+    message: str = ""         # ready to paste, plain text
+    where: str = ""           # how to send it (PolicyResult.where, or the claim agent's default)
+    error: Optional[str] = None
