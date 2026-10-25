@@ -3,6 +3,7 @@
 A rule table per store, no LLM and no scraping: answers instantly and costs no credits.
 See "Refund requests" in AGENTS.md for the contract and where each rule comes from.
 """
+import asyncio
 import json
 import os
 import sys
@@ -10,6 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from uagents import Agent, Context
+from uagents.communication import send_sync_message
+from uagents.resolver import RulesBasedResolver
 
 from models import PolicyCheck, PolicyResult
 
@@ -121,11 +124,25 @@ async def on_check(ctx: Context, sender: str, req: PolicyCheck):
     await ctx.send(sender, result)
 
 
+async def send_once(req: PolicyCheck):
+    """Manual test of the running agent: send it one PolicyCheck as a message and print its reply.
+    Goes straight to this machine's port 8005 (no mailbox), so start the agent first."""
+    local = RulesBasedResolver({agent.address: "http://127.0.0.1:8005/submit"})
+    reply = await send_sync_message(agent.address, req, response_type=PolicyResult, resolver=local, timeout=15)
+    if isinstance(reply, PolicyResult):
+        print(json.dumps(json.loads(reply.model_dump_json()), indent=2))
+    else:
+        sys.exit(f"No reply ({reply}). Is the policy agent running? Start it with uv run policy_agent.py")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 4 and sys.argv[1] == "--check":
-        # uv run policy_agent.py --check <store> <price_paid> <current_price> [YYYY-MM-DD]
+    if len(sys.argv) > 4 and sys.argv[1] in ("--check", "--send"):
+        # uv run policy_agent.py --check|--send <store> <price_paid> <current_price> [YYYY-MM-DD]
         req = PolicyCheck(item_id="it_check000", store=sys.argv[2], price_paid=float(sys.argv[3]),
                           current_price=float(sys.argv[4]), purchase_date=sys.argv[5] if len(sys.argv) > 5 else "")
-        print(json.dumps(json.loads(decide(req).model_dump_json()), indent=2))
+        if sys.argv[1] == "--send":
+            asyncio.run(send_once(req))
+        else:
+            print(json.dumps(json.loads(decide(req).model_dump_json()), indent=2))
     else:
         agent.run()
