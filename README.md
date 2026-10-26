@@ -1,5 +1,29 @@
 # RefundHunter
 
+🏆 **Honorable Mention, Best Use of ASI:One, [Cal Hacks 13.0](https://cal-hacks-13-0.devpost.com/)** (Oct. 2026)
+
+RefundHunter tracks the prices of things you've already bought and tells you, right inside an ASI:One chat, when you could get money back. Add purchases with a receipt photo, a read-only Gmail import, or a product link. When a price drops, it checks the store's price-adjustment policy and drafts the refund request for you to send.
+
+[Devpost](https://devpost.com/software/refundhunter-hs1u63) · [Demo video](https://www.youtube.com/watch?v=S4-WSQmkzrE) · [Coordinator on Agentverse](https://agentverse.ai/agents/details/agent1qwnc3nh50jssgwdduvwzhdjqd6ngyvgpeg9dsj4srekauwpt5qfdwzlslfs/profile)
+
+## How it works
+
+Five Fetch.ai uAgents, each registered on Agentverse with its own mailbox, pass typed messages (`models.py`) so each one has a single job:
+
+| Agent | File | What it does |
+| --- | --- | --- |
+| Coordinator | `agent.py` | The only agent you talk to. Runs the Agent Chat Protocol and Interactive Cards, and saves your items |
+| Parser | `parser_agent.py` | Reads receipt photos and order emails with ASI:One's `asi1` model into store, date, order number, and line items |
+| Price agent | `price_agent.py` | Gets live prices from Bright Data's Scraper API (Amazon, Walmart, Target, Best Buy) and searches for items without a link |
+| Policy agent | `policy_agent.py` | Checks which refund the store allows and the deadline |
+| Claim writer | `claim_agent.py` | Drafts the refund request for you to send |
+
+**Stack:** Python 3.13, uAgents, Agentverse, ASI:One (Chat Protocol, Interactive Cards, `asi1`), Bright Data Scraper API, Google OAuth / Gmail API, FastAPI, SQLite
+
+**Team:** [Vinny Vinh Pham](https://devpost.com/vnnphm), [Jiayi Su](https://devpost.com/etnentryno-1), [Jingqi Mao](https://devpost.com/spring_mao)
+
+See `AGENTS.md` for the full design, message contract, and rules.
+
 ## Run it locally
 
 **Quickest way: one command for all agents.** Install uv (step 1 below), open this folder in VS Code, then Terminal → New Terminal and run:
